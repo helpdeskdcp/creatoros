@@ -1,0 +1,34 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: 250 250 252;
+  --fg: 15 15 20;
+  --card: 255 255 255;
+  --border: 228 228 233;
+  --muted: 113 113 122;
+}
+
+.dark {
+  --bg: 10 10 14;
+  --fg: 240 240 245;
+  --card: 22 22 28;
+  --border: 40 40 48;
+  --muted: 161 161 170;
+}
+
+body {
+  background-color: rgb(var(--bg));
+  color: rgb(var(--fg));
+}
+
+.card {
+  background-color: rgb(var(--card));
+  border: 1px solid rgb(var(--border));
+  border-radius: 0.75rem;
+}
+
+.muted {
+  color: rgb(var(--muted));
+}

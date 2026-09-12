@@ -23,6 +23,7 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     task_default_retry_delay=60,
     task_time_limit=900,
+    broker_connection_retry_on_startup=True,
 )
 
 celery_app.conf.beat_schedule = {
