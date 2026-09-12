@@ -4,11 +4,12 @@ here imports httpx/Google APIs directly."""
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import decrypt, encrypt
-from app.core.errors import ConflictError, NotFoundError
+from app.core.errors import ConflictError, NotFoundError, UnauthorizedError
 from app.core.logging import get_logger
 from app.core.security import create_jwt, decode_jwt
 from app.core.timeutils import ensure_aware
@@ -26,9 +27,22 @@ def build_oauth_state(user_id: uuid.UUID) -> str:
 
 
 def verify_oauth_state(state: str) -> uuid.UUID:
-    payload = decode_jwt(state)
+    """Validates the signed `state` JWT Google echoes back on redirect.
+
+    This request comes straight from the user's browser (a top-level
+    navigation from Google's consent screen), never carrying our normal
+    Authorization header — `state` is the only thing tying this request back
+    to the CreatorOS user who started the flow. Since it's HMAC-signed with
+    JWT_SECRET, Google can only ever echo back exactly what we handed it,
+    which is what makes this CSRF-safe: an attacker cannot forge a state
+    value that decodes to a different, arbitrary user_id.
+    """
+    try:
+        payload = decode_jwt(state)
+    except jwt.PyJWTError as exc:
+        raise UnauthorizedError("OAuth state is invalid or has expired") from exc
     if payload.get("purpose") != "yt_oauth":
-        raise ConflictError("Invalid OAuth state")
+        raise UnauthorizedError("OAuth state was not issued for this flow")
     return uuid.UUID(payload["sub"])
 
 
@@ -48,6 +62,13 @@ async def connect_channel_via_oauth(db: AsyncSession, user_id: uuid.UUID, code: 
         select(Channel).where(Channel.youtube_channel_id == channel_data.youtube_channel_id)
     )
     if existing:
+        # Multi-user isolation: completing OAuth for a channel someone else
+        # already connected must never silently transfer ownership or
+        # overwrite their tokens with this user's.
+        if existing.owner_user_id != user_id:
+            raise ConflictError(
+                "This YouTube channel is already connected to a different CreatorOS account"
+            )
         channel = existing
     else:
         channel = Channel(owner_user_id=user_id, youtube_channel_id=channel_data.youtube_channel_id)
