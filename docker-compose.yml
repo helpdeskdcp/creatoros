@@ -51,6 +51,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    extra_hosts:
+      # Lets OLLAMA_BASE_URL=http://host.docker.internal:11434 reach a local
+      # Ollama running on the host. Docker Desktop resolves this by default;
+      # plain Docker Engine on Linux needs this explicit mapping.
+      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
     healthcheck:
@@ -80,6 +85,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - creatoros_storage:/app/storage
 
@@ -105,6 +112,13 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      # Next.js inlines NEXT_PUBLIC_* vars into the client JS bundle at
+      # `next build` time, not at container runtime — this MUST be a build
+      # arg, not just a runtime `environment:` entry below, or the frontend
+      # image silently bakes in the Dockerfile's own localhost default
+      # regardless of what's actually configured in .env.
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000/api/v1}
     container_name: creatoros-frontend
     restart: unless-stopped
     environment:
