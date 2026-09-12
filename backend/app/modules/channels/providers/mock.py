@@ -1,0 +1,120 @@
+"""Deterministic in-memory YouTubeProvider used by tests and local dev when
+no YouTube credentials are configured. Never used in production — main.py
+wires the real provider whenever YOUTUBE_CLIENT_ID/SECRET are set.
+"""
+from datetime import UTC, datetime, timedelta
+
+from app.modules.channels.providers.base import (
+    AnalyticsRow,
+    ChannelData,
+    OAuthTokens,
+    UploadMetadata,
+    UploadResult,
+    UploadSession,
+    VideoData,
+    VideosPage,
+    YouTubeProvider,
+)
+
+
+class MockYouTubeProvider(YouTubeProvider):
+    def __init__(self) -> None:
+        self._now = datetime.now(UTC)
+
+    async def get_oauth_authorize_url(self, state: str) -> str:
+        return f"https://mock.youtube.local/oauth/authorize?state={state}"
+
+    async def exchange_oauth_code(self, code: str) -> OAuthTokens:
+        return OAuthTokens(
+            access_token=f"mock-access-{code}",
+            refresh_token=f"mock-refresh-{code}",
+            expires_at=self._now + timedelta(hours=1),
+        )
+
+    async def refresh_oauth_token(self, refresh_token: str) -> OAuthTokens:
+        return OAuthTokens(
+            access_token="mock-access-refreshed",
+            refresh_token=refresh_token,
+            expires_at=self._now + timedelta(hours=1),
+        )
+
+    async def get_channel(
+        self, channel_id: str | None = None, access_token: str | None = None
+    ) -> ChannelData:
+        cid = channel_id or "UC_mock_demo_channel"
+        return ChannelData(
+            youtube_channel_id=cid,
+            title="Demo Creator Channel",
+            description="A mock channel used for local development and tests.",
+            thumbnail_url="https://mock.youtube.local/thumb.jpg",
+            country="US",
+            subscriber_count=12000,
+            view_count=1_500_000,
+            video_count=42,
+        )
+
+    async def list_channel_videos(
+        self, channel_id: str, page_token: str | None = None, max_results: int = 50
+    ) -> VideosPage:
+        videos = [
+            VideoData(
+                youtube_video_id=f"mockvid{i:03d}",
+                title=f"Mock Video {i}",
+                description="Mock description",
+                thumbnail_url="https://mock.youtube.local/thumb.jpg",
+                published_at=self._now - timedelta(days=i * 3),
+                duration_seconds=600 if i % 3 else 45,
+                category_id="27",
+                tags=["mock", "demo"],
+                view_count=1000 * (i + 1),
+                like_count=50 * (i + 1),
+                comment_count=5 * (i + 1),
+                is_short=not bool(i % 3),
+            )
+            for i in range(1, 11)
+        ]
+        return VideosPage(videos=videos, next_page_token=None)
+
+    async def get_video_details(self, video_ids: list[str]) -> list[VideoData]:
+        return [
+            VideoData(
+                youtube_video_id=vid,
+                title=f"Mock Video {vid}",
+                description="Mock description",
+                thumbnail_url="https://mock.youtube.local/thumb.jpg",
+                published_at=self._now - timedelta(days=1),
+                duration_seconds=600,
+                category_id="27",
+                tags=["mock"],
+                view_count=1000,
+                like_count=50,
+                comment_count=5,
+            )
+            for vid in video_ids
+        ]
+
+    async def get_channel_analytics(
+        self, channel_id: str, access_token: str, start_date: datetime, end_date: datetime
+    ) -> list[AnalyticsRow]:
+        return []
+
+    async def prepare_upload(
+        self, access_token: str, metadata: UploadMetadata, file_size_bytes: int
+    ) -> UploadSession:
+        return UploadSession(upload_url="https://mock.youtube.local/upload/session-1")
+
+    async def upload_video(
+        self, upload_session: UploadSession, file_path: str, content_type: str
+    ) -> UploadResult:
+        return UploadResult(youtube_video_id="mockuploadvid", processing_status="succeeded")
+
+    async def set_thumbnail(
+        self, access_token: str, youtube_video_id: str, thumbnail_path: str
+    ) -> None:
+        return None
+
+    async def check_processing_status(self, access_token: str, youtube_video_id: str) -> str:
+        return "succeeded"
+
+    async def verify_publication(self, youtube_video_id: str) -> bool:
+        return True

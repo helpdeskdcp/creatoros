@@ -1,0 +1,137 @@
+name: creatoros
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: creatoros-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-creatoros}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-creatoros}
+      POSTGRES_DB: ${POSTGRES_DB:-creatoros}
+    volumes:
+      - creatoros_pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-creatoros}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: creatoros-redis
+    restart: unless-stopped
+    volumes:
+      - creatoros_redisdata:/data
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6380}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: creatoros-backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-creatoros}:${POSTGRES_PASSWORD:-creatoros}@postgres:5432/${POSTGRES_DB:-creatoros}
+      DATABASE_URL_SYNC: postgresql+psycopg://${POSTGRES_USER:-creatoros}:${POSTGRES_PASSWORD:-creatoros}@postgres:5432/${POSTGRES_DB:-creatoros}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - creatoros_storage:/app/storage
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: creatoros-worker
+    restart: unless-stopped
+    command: ["celery", "-A", "app.jobs.celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-creatoros}:${POSTGRES_PASSWORD:-creatoros}@postgres:5432/${POSTGRES_DB:-creatoros}
+      DATABASE_URL_SYNC: postgresql+psycopg://${POSTGRES_USER:-creatoros}:${POSTGRES_PASSWORD:-creatoros}@postgres:5432/${POSTGRES_DB:-creatoros}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - creatoros_storage:/app/storage
+
+  beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: creatoros-beat
+    restart: unless-stopped
+    command: ["celery", "-A", "app.jobs.celery_app", "beat", "--loglevel=INFO"]
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: creatoros-frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000/api/v1}
+    depends_on:
+      - backend
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: creatoros-nginx
+    restart: unless-stopped
+    volumes:
+      - ./infrastructure/nginx/creatoros.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - backend
+      - frontend
+    ports:
+      - "${NGINX_PORT:-8080}:80"
+
+volumes:
+  creatoros_pgdata:
+  creatoros_redisdata:
+  creatoros_storage:
