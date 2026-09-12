@@ -101,3 +101,30 @@ async def test_oauth_callback_get_never_transfers_ownership_between_users(
         select(Channel).where(Channel.owner_user_id == uuid.UUID(other_id))
     )
     assert other_owned is None
+
+
+@pytest.mark.asyncio
+async def test_oauth_status_reports_mock_mode_without_real_credentials(client, unique_email):
+    """conftest.py sets YOUTUBE_CLIENT_ID/SECRET to empty strings for the
+    whole test suite — this must be reflected honestly, not guessed."""
+    token = (
+        await client.post(
+            "/api/v1/auth/register",
+            json={"email": unique_email, "password": "supersecurepassword1"},
+        )
+    ).json()["access_token"]
+
+    resp = await client.get(
+        "/api/v1/channels/oauth/status", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["configured"] is False
+    assert "readonly" in body["scopes"][0]
+    assert body["redirect_uri"]
+
+
+@pytest.mark.asyncio
+async def test_oauth_status_requires_authentication(client):
+    resp = await client.get("/api/v1/channels/oauth/status")
+    assert resp.status_code == 401

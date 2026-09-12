@@ -43,6 +43,15 @@ class Settings(BaseSettings):
     youtube_client_secret: str = ""
     youtube_redirect_uri: str = "http://localhost:8000/api/v1/channels/oauth/callback"
     youtube_api_key: str = ""
+    # CreatorOS has no way to query Google's own OAuth consent-screen
+    # publishing status (that lives entirely in Google Cloud Console, behind
+    # a separate API this app doesn't have access to) — this is an explicit,
+    # operator-set declaration of what YOU configured there, not something
+    # auto-detected. "testing" (the default every new Google Cloud OAuth
+    # consent screen starts in) means only accounts added as Test Users can
+    # complete the flow; set to "production" only once Google has actually
+    # approved verification for the sensitive scopes below.
+    youtube_oauth_publishing_status: str = "testing"
 
     # --- AI ---
     ai_primary_provider: str = "ollama"

@@ -13,11 +13,13 @@ from app.modules.auth.dependencies import get_current_user, require_editor
 from app.modules.channels import service
 from app.modules.channels.models import Channel
 from app.modules.channels.providers.base import YouTubeProviderError
+from app.modules.channels.providers.youtube_data_api import SCOPES
 from app.modules.channels.schemas import (
     ChannelOut,
     ConnectChannelRequest,
     OAuthAuthorizeResponse,
     OAuthCallbackRequest,
+    OAuthStatusResponse,
 )
 from app.modules.users.models import User
 
@@ -30,6 +32,20 @@ async def list_channels(db: AsyncSession = Depends(get_db), user: User = Depends
         select(Channel).where(Channel.owner_user_id == user.id).order_by(Channel.created_at.desc())
     )
     return list(result)
+
+
+@router.get("/oauth/status", response_model=OAuthStatusResponse)
+async def oauth_status(user: User = Depends(get_current_user)):
+    """Lets the frontend show an accurate, honest banner before anyone
+    clicks "Connect with Google" — never guesses whether Google will
+    actually accept a given account; see OAuthStatusResponse docstring."""
+    settings = get_settings()
+    return OAuthStatusResponse(
+        configured=settings.youtube_configured,
+        publishing_status=settings.youtube_oauth_publishing_status,
+        redirect_uri=settings.youtube_redirect_uri,
+        scopes=SCOPES,
+    )
 
 
 @router.get("/oauth/authorize", response_model=OAuthAuthorizeResponse)

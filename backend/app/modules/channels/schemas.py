@@ -38,3 +38,16 @@ class OAuthAuthorizeResponse(BaseModel):
 class OAuthCallbackRequest(BaseModel):
     code: str
     state: str
+
+
+class OAuthStatusResponse(BaseModel):
+    """Server-side OAuth diagnostics — never includes the client secret or
+    any token. `publishing_status` is an operator-declared value (see
+    Settings.youtube_oauth_publishing_status): CreatorOS cannot query
+    Google's own consent-screen state, so this reflects what the
+    administrator configured, not something auto-detected."""
+
+    configured: bool
+    publishing_status: str
+    redirect_uri: str
+    scopes: list[str]

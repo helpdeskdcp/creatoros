@@ -13,8 +13,22 @@ interface OAuthAuthorizeResponse {
   state: string;
 }
 
+interface OAuthStatusResponse {
+  configured: boolean;
+  publishing_status: string;
+  redirect_uri: string;
+  scopes: string[];
+}
+
 const OAUTH_ERROR_MESSAGES: Record<string, string> = {
-  access_denied: "You declined the Google consent screen.",
+  // Google's own "not an approved tester" block page never redirects back
+  // here at all (it dead-ends on accounts.google.com) — so if we ever DO
+  // see access_denied, it's more likely a real consent decline. Still
+  // mention testing mode since some Google flow variants do redirect back
+  // with this code for the same underlying reason.
+  access_denied:
+    "Google denied access. Either you declined the consent screen, or — if this app's OAuth is " +
+    "still in Testing mode — your Google account hasn't been added as an approved Test User yet.",
   missing_code_or_state: "Google's redirect was missing required parameters.",
   invalid_state: "The OAuth session expired or was invalid — please try connecting again.",
   connect_failed: "CreatorOS could not complete the connection with that Google account.",
@@ -51,6 +65,11 @@ export default function ChannelsPage() {
   const channelsQuery = useQuery({
     queryKey: ["channels"],
     queryFn: () => api.get<Channel[]>("/channels"),
+  });
+
+  const oauthStatusQuery = useQuery({
+    queryKey: ["oauth-status"],
+    queryFn: () => api.get<OAuthStatusResponse>("/channels/oauth/status"),
   });
 
   const connectMutation = useMutation({
@@ -104,7 +123,26 @@ export default function ChannelsPage() {
           Required for authorized analytics (CTR, retention, subscriber attribution) and
           publishing. You&apos;ll be sent to Google to sign in and grant CreatorOS access to your
           own YouTube channel — every CreatorOS account connects its own channel independently.
+          Make sure you sign in with the same Google account that actually owns the YouTube
+          channel you want to connect.
         </p>
+
+        {oauthStatusQuery.data?.configured &&
+          oauthStatusQuery.data.publishing_status === "testing" && (
+            <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">
+              <strong>Google OAuth is currently in Testing mode.</strong> Only Google accounts
+              added as Test Users in this app&apos;s Google Cloud OAuth consent screen can
+              connect. If your account isn&apos;t approved, ask whoever manages this deployment to
+              add it there — CreatorOS itself can&apos;t grant that access.
+            </div>
+          )}
+        {oauthStatusQuery.data && !oauthStatusQuery.data.configured && (
+          <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">
+            Google OAuth isn&apos;t configured on this server yet — connecting will use mock
+            YouTube data for development purposes only.
+          </div>
+        )}
+
         <Button onClick={() => oauthConnectMutation.mutate()} disabled={oauthConnectMutation.isPending}>
           {oauthConnectMutation.isPending ? "Redirecting to Google…" : "Connect with Google"}
         </Button>
