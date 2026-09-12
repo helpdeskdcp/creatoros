@@ -4,7 +4,7 @@ import pytest
 from pydantic import BaseModel
 
 from app.ai.orchestrator import AIOrchestrator, AIOrchestratorError
-from app.ai.providers.base import AICompletionResult, AIMessage, AIProvider, AIProviderError
+from app.ai.providers.base import AICompletionResult, AIProvider, AIProviderError
 
 
 class _ScriptedProvider(AIProvider):
@@ -20,7 +20,9 @@ class _ScriptedProvider(AIProvider):
     async def complete(self, messages, *, temperature=0.4, max_tokens=2000, json_mode=False):
         self.calls += 1
         text = self._responses.pop(0)
-        return AICompletionResult(text=text, provider=self.name, model="scripted-1", prompt_tokens=1, completion_tokens=1)
+        return AICompletionResult(
+            text=text, provider=self.name, model="scripted-1", prompt_tokens=1, completion_tokens=1
+        )
 
 
 class _AlwaysFailsProvider(AIProvider):

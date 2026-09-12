@@ -119,8 +119,8 @@ async def detect_content_gaps(
     own_keywords: set[str] = set()
     if own_channel_ids:
         own_videos = await db.scalars(select(Video).where(Video.channel_id.in_(own_channel_ids)))
-        for v in own_videos:
-            own_keywords |= extract_keywords(v.title)
+        for own_video in own_videos:
+            own_keywords |= extract_keywords(own_video.title)
 
     gaps: list[ContentGap] = []
     for kw, comp_set in keyword_to_competitors.items():

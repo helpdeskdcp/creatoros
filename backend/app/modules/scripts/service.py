@@ -40,7 +40,9 @@ async def generate_script(
 
     await _generate_version(db, orchestrator, script, fmt, key_points, version_number=1)
     await db.commit()
-    return await get_script(db, script.id)
+    result = await get_script(db, script.id)
+    assert result is not None  # just committed above; only None if the row vanished mid-request
+    return result
 
 
 async def add_script_version(
@@ -52,7 +54,9 @@ async def add_script_version(
     next_version = (max((v.version_number for v in script.versions), default=0)) + 1
     await _generate_version(db, orchestrator, script, script.format, key_points, next_version)
     await db.commit()
-    return await get_script(db, script.id)
+    result = await get_script(db, script.id)
+    assert result is not None  # script already existed; only None if the row vanished mid-request
+    return result
 
 
 async def _generate_version(
