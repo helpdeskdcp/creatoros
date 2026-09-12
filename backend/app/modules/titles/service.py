@@ -3,6 +3,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.cache import cached_generate
 from app.ai.orchestrator import AIOrchestrator
 from app.modules.titles.models import Title
 from app.modules.titles.schemas import GeneratedTitlesResponse
@@ -25,7 +26,7 @@ async def generate_titles(
     video_id: uuid.UUID | None,
     count: int,
 ) -> list[Title]:
-    result = await orchestrator.generate_structured(
+    result = await cached_generate(db, orchestrator, 
         task="generate_titles",
         system_prompt=SYSTEM_PROMPT,
         user_prompt=f"Topic: {topic}\nGenerate exactly {count} title candidates.",

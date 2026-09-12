@@ -4,6 +4,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.cache import cached_generate
 from app.ai.orchestrator import AIOrchestrator
 from app.modules.seo.models import SeoRecord
 from app.modules.seo.schemas import _GeneratedSeo
@@ -24,7 +25,7 @@ async def generate_seo(
     description: str,
     video_id: uuid.UUID | None,
 ) -> SeoRecord:
-    result: _GeneratedSeo = await orchestrator.generate_structured(
+    result: _GeneratedSeo = await cached_generate(db, orchestrator, 
         task="generate_seo",
         system_prompt=SYSTEM_PROMPT,
         user_prompt=f"Video title: {title}\nVideo description/summary: {description}",

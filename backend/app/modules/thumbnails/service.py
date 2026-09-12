@@ -3,6 +3,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.cache import cached_generate
 from app.ai.orchestrator import AIOrchestrator
 from app.modules.thumbnails.models import ThumbnailBrief
 from app.modules.thumbnails.schemas import _GeneratedThumbnailBrief
@@ -27,7 +28,7 @@ async def generate_thumbnail_brief(
     brand_notes: str | None,
 ) -> ThumbnailBrief:
     user_prompt = f"Video title: {video_title}\nBrand notes: {brand_notes or 'none provided'}"
-    result: _GeneratedThumbnailBrief = await orchestrator.generate_structured(
+    result: _GeneratedThumbnailBrief = await cached_generate(db, orchestrator, 
         task="generate_thumbnail_brief",
         system_prompt=SYSTEM_PROMPT,
         user_prompt=user_prompt,

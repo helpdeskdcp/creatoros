@@ -5,16 +5,18 @@ See `docs/FINAL_AUDIT.md` for what's already done and verified.
 
 ## Near-term (would meaningfully improve what exists)
 
-- **AI result caching** (spec item: cache identical transcript/topic/
-  metadata inputs). Currently every `generate_structured()` call hits the
-  configured provider fresh — real cost/latency win for repeat inputs.
-  Shape: a `(prompt_name, prompt_version, input_hash, model) → result`
-  table, checked before calling `AIOrchestrator`.
-- **Prompt versioning**. Prompts currently live as string constants next
-  to each module's `service.py`. Extracting them into a
-  `prompt_templates` table/registry with a version field would let
-  `docs/FINAL_AUDIT.md`-style traceability extend to "which prompt version
-  produced this hook".
+- ~~**AI result caching**~~ — done: `app/ai/cache.py:cached_generate()` +
+  `ai_generation_cache` table, wired into every AI-generation service. See
+  `docs/ai.md`.
+- **Formal prompt-template registry**. Basic versioning exists (a
+  `prompt_version` string per call site, checked as part of the cache key)
+  but prompts still live as string constants next to each module's
+  `service.py` rather than in a queryable `prompt_templates` table — that
+  would let audit-style traceability extend to "which prompt version
+  produced this hook."
+- **AI usage dashboard** aggregating the `ai_cache_hit`/
+  `ai_cache_miss_stored`/`ai_generation_succeeded` structured log events
+  already emitted (tokens, latency, cache hit rate per task).
 - **Frontend automated tests**. `vitest` is wired into `package.json` but
   no test files exist yet. Priority: `lib/api.ts`'s refresh-on-401 logic
   and `lib/auth-context.tsx`.

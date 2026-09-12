@@ -3,6 +3,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.cache import cached_generate
 from app.ai.orchestrator import AIOrchestrator
 from app.modules.hooks.models import Hook
 from app.modules.hooks.schemas import GeneratedHooksResponse
@@ -30,7 +31,7 @@ async def generate_hooks(
         f"Target audience: {audience or 'general YouTube audience'}\n"
         f"Generate exactly {count} hooks."
     )
-    result = await orchestrator.generate_structured(
+    result = await cached_generate(db, orchestrator, 
         task="generate_hooks",
         system_prompt=SYSTEM_PROMPT,
         user_prompt=user_prompt,

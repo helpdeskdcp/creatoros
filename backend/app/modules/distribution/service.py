@@ -7,6 +7,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.cache import cached_generate
 from app.ai.orchestrator import AIOrchestrator
 from app.modules.distribution.models import DistributionAsset, DistributionCampaign
 from app.modules.distribution.schemas import GeneratedAssetsResponse
@@ -63,7 +64,7 @@ async def generate_assets(
         f"Transcript excerpt: {transcript_excerpt}\n"
         f"Generate one asset for each of these platforms: {', '.join(p.value for p in platforms)}"
     )
-    result: GeneratedAssetsResponse = await orchestrator.generate_structured(
+    result: GeneratedAssetsResponse = await cached_generate(db, orchestrator, 
         task="generate_distribution_assets",
         system_prompt=SYSTEM_PROMPT,
         user_prompt=user_prompt,

@@ -75,10 +75,26 @@ never import `app.ai`.
 3. No other code changes — every existing `generate_structured()` call site
    picks it up automatically via `AI_PRIMARY_PROVIDER`/`AI_FALLBACK_PROVIDER`.
 
-## Known limitation
+## Result caching (spec item #22)
 
-Prompt-result caching (task #22 in the original spec: cache identical
-transcript/topic/metadata inputs to avoid redundant AI calls) and formal
-prompt versioning (task #23) are **not yet implemented** — every
-`generate_structured()` call hits the configured provider fresh. This is
-the most valuable near-term AI-cost optimization; see `docs/ROADMAP.md`.
+`app/ai/cache.py:cached_generate()` wraps `generate_structured()` with a
+database cache keyed on `(task, prompt_version, model, hash(system_prompt +
+user_prompt))`, backed by the `ai_generation_cache` table. Every
+AI-generation service (hooks, titles, scripts, SEO, thumbnails,
+recommendations, distribution assets) calls this instead of the
+orchestrator directly — an identical request never reaches the AI provider
+twice. Bump the `prompt_version` argument at a call site when that
+module's prompt wording changes enough that old cached results should stop
+being reused (basic prompt versioning, spec item #23).
+
+Cache writes use `db.flush()`, not `commit()` — several call sites batch
+multiple generations before one commit (e.g.
+`recommendations.generate_next_best_videos`), and an eager commit inside
+the cache helper would break that transaction's atomicity on a mid-batch
+failure.
+
+Not yet built: a queryable AI-usage dashboard aggregating cache hit rate,
+tokens, and cost per task (spec item #24) — `cached_generate()` and
+`AIOrchestrator` both log structured events (`ai_cache_hit`,
+`ai_cache_miss_stored`, `ai_generation_succeeded`) that such a dashboard
+would aggregate; see `docs/ROADMAP.md`.

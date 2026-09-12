@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.cache import cached_generate
 from app.ai.orchestrator import AIOrchestrator
 from app.core.data_quality import MIN_SAMPLE_SIZE_RECOMMENDATION, Confidence
 from app.modules.recommendations.models import Recommendation
@@ -82,7 +83,7 @@ async def generate_next_best_videos(
             f"Opportunity level: {opp.level.value} ({opp.explanation})\n"
             f"Description: {topic.description or 'n/a'}"
         )
-        detail: _GeneratedRecommendationDetail = await orchestrator.generate_structured(
+        detail: _GeneratedRecommendationDetail = await cached_generate(db, orchestrator, 
             task="next_best_video",
             system_prompt=SYSTEM_PROMPT,
             user_prompt=user_prompt,

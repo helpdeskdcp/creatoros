@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.ai.cache import cached_generate
 from app.ai.orchestrator import AIOrchestrator
 from app.modules.scripts.models import Script, ScriptFormat, ScriptVersion
 from app.modules.scripts.schemas import _GeneratedScript
@@ -72,7 +73,7 @@ async def _generate_version(
         f"Format: {_FORMAT_DESCRIPTIONS[fmt]}\n"
         f"Key points to cover: {', '.join(key_points) if key_points else '(use your judgment)'}"
     )
-    result: _GeneratedScript = await orchestrator.generate_structured(
+    result: _GeneratedScript = await cached_generate(db, orchestrator, 
         task="generate_script",
         system_prompt=SYSTEM_PROMPT,
         user_prompt=user_prompt,

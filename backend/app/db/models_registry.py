@@ -2,6 +2,7 @@
 autogenerate or the test suite's create_all() run. Import this module (not
 individual model modules) whenever you need the complete metadata graph.
 """
+from app.ai.models import AIGenerationCache  # noqa: F401
 from app.db.base import Base  # noqa: F401
 from app.jobs.models import Job, KillSwitch  # noqa: F401
 from app.modules.analytics.models import (  # noqa: F401
