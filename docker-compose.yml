@@ -123,6 +123,13 @@ services:
     restart: unless-stopped
     environment:
       NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000/api/v1}
+      # Docker auto-sets HOSTNAME=<container-id> for every container, and
+      # Next.js's standalone server.js reads that as its bind address —
+      # without this override it binds only to the container's own IP, not
+      # 0.0.0.0, so the container's own healthcheck (which hits localhost)
+      # gets ECONNREFUSED even though external traffic via the published
+      # port works fine.
+      HOSTNAME: "0.0.0.0"
     depends_on:
       - backend
     ports:
