@@ -66,6 +66,15 @@ export default function RegisterPage() {
             Sign in
           </Link>
         </p>
+        <p className="mt-4 text-center text-xs muted">
+          <Link href="/privacy" className="hover:underline">
+            Privacy Policy
+          </Link>
+          {" · "}
+          <Link href="/terms" className="hover:underline">
+            Terms of Service
+          </Link>
+        </p>
       </div>
     </div>
   );
