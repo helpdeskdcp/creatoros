@@ -3,6 +3,9 @@ import uuid
 
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("DATABASE_URL_SYNC", "sqlite:///:memory:")
+# Deliberately unreachable: RateLimitMiddleware must fail OPEN when Redis is
+# down, and tests must never depend on (or pollute) a real Redis instance.
+os.environ.setdefault("REDIS_URL", "redis://127.0.0.1:1/0")
 os.environ.setdefault("JWT_SECRET", "test-secret-not-for-production")
 os.environ.setdefault("ENCRYPTION_KEY", "test-encryption-key-not-for-production")
 os.environ.setdefault("YOUTUBE_CLIENT_ID", "")

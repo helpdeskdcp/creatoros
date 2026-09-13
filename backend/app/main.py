@@ -8,6 +8,8 @@ from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
 from app.core.middleware import RequestContextMiddleware
+from app.core.rate_limit import RateLimitMiddleware
+from app.core.security_headers import SecurityHeadersMiddleware
 from app.db.session import engine
 
 logger = get_logger(__name__)
@@ -25,6 +27,13 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
     )
 
+    # Starlette wraps middleware in reverse add-order (last added = outermost),
+    # so CORS is added LAST -- it must wrap everything, including an early
+    # 429 from RateLimitMiddleware, or a rate-limited browser request would
+    # fail as a CORS error instead of showing the real "too many requests".
+    app.add_middleware(SecurityHeadersMiddleware, hsts_enabled=settings.is_production)
+    app.add_middleware(RequestContextMiddleware)
+    app.add_middleware(RateLimitMiddleware, redis_url=settings.redis_url)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
@@ -32,7 +41,6 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.add_middleware(RequestContextMiddleware)
 
     register_exception_handlers(app)
     _register_routers(app, settings)
