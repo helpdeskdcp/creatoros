@@ -5,6 +5,7 @@ Every error response has the same shape:
 so frontend error handling never has to special-case an endpoint.
 """
 from fastapi import Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -65,10 +66,17 @@ def register_exception_handlers(app) -> None:
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError):
+        # A custom field_validator raising a bare ValueError (e.g.
+        # publishing.schemas._require_tz_aware) makes pydantic embed the
+        # actual exception OBJECT in errors()[i]["ctx"]["error"] --
+        # jsonable_encoder is what FastAPI's own default handler uses to
+        # make that safe to serialize; without it this 422 handler itself
+        # raised a second, unrelated 500 (TypeError: ValueError not
+        # JSON serializable) on top of the real validation error.
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             content=_envelope(request, "validation_error", "Invalid request payload")
-            | {"details": exc.errors()},
+            | {"details": jsonable_encoder(exc.errors())},
         )
 
     @app.exception_handler(Exception)

@@ -98,6 +98,16 @@ class PublishingRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         GUID(), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Timezone-aware. NULL means "publish as soon as approved" (existing
+    # behavior, unchanged). Set means the run sits in SCHEDULED until a
+    # periodic worker atomically claims it once scheduled_at has passed --
+    # approving a scheduled run never publishes it immediately.
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancelled_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class PublishingAttempt(Base, UUIDPrimaryKeyMixin, TimestampMixin):

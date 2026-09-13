@@ -47,4 +47,8 @@ celery_app.conf.beat_schedule = {
         "task": "app.jobs.tasks.poll_pending_publishing_runs_task",
         "schedule": 600.0,
     },
+    "poll-scheduled-publishing-runs": {
+        "task": "app.jobs.tasks.poll_scheduled_publishing_runs_task",
+        "schedule": 60.0,
+    },
 }

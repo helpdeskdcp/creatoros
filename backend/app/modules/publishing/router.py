@@ -14,6 +14,7 @@ from app.modules.publishing.schemas import (
     ExecuteRunResultOut,
     PublishingRuleOut,
     PublishingRunOut,
+    RescheduleRunRequest,
     SafetyGateResultOut,
     UpdatePublishingRuleRequest,
 )
@@ -59,11 +60,11 @@ async def create_run(
 
         await get_owned_or_404(db, MediaAsset, payload.media_asset_id, user.id)
     metadata = payload.model_dump(
-        exclude={"channel_id", "content_item_id", "mode", "idempotency_key", "media_asset_id"}
+        exclude={"channel_id", "content_item_id", "mode", "idempotency_key", "media_asset_id", "scheduled_at"}
     )
     return await service.create_run(
         db, user.id, payload.channel_id, payload.content_item_id, payload.mode, metadata,
-        payload.idempotency_key, media_asset_id=payload.media_asset_id,
+        payload.idempotency_key, media_asset_id=payload.media_asset_id, scheduled_at=payload.scheduled_at,
     )
 
 
@@ -85,6 +86,27 @@ async def approve_run(
 ):
     run = await get_owned_or_404(db, PublishingRun, run_id, user.id)
     return await service.approve_run(db, run, user.id)
+
+
+@router.post("/runs/{run_id}/cancel", response_model=PublishingRunOut)
+async def cancel_run(
+    run_id: uuid.UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_editor)
+):
+    """Only allowed before an upload has actually started -- see
+    service.cancel_run's docstring."""
+    run = await get_owned_or_404(db, PublishingRun, run_id, user.id)
+    return await service.cancel_run(db, run, user.id)
+
+
+@router.patch("/runs/{run_id}/reschedule", response_model=PublishingRunOut)
+async def reschedule_run(
+    run_id: uuid.UUID,
+    payload: RescheduleRunRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_editor),
+):
+    run = await get_owned_or_404(db, PublishingRun, run_id, user.id)
+    return await service.reschedule_run(db, run, user.id, payload.scheduled_at)
 
 
 @router.post("/runs/{run_id}/execute", response_model=ExecuteRunResultOut)

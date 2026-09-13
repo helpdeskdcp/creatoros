@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.errors import ConflictError
 from app.core.logging import get_logger
 from app.core.timeutils import ensure_aware
 from app.jobs import kill_switch
@@ -68,6 +69,7 @@ async def create_run(
     metadata: dict,
     idempotency_key: str,
     media_asset_id: uuid.UUID | None = None,
+    scheduled_at: datetime | None = None,
 ) -> PublishingRun:
     existing = await db.scalar(
         select(PublishingRun).where(PublishingRun.idempotency_key == idempotency_key)
@@ -84,6 +86,7 @@ async def create_run(
         state=PublishingState.DRAFT,
         metadata_json=json.dumps(metadata),
         video_media_asset_id=media_asset_id,
+        scheduled_at=scheduled_at,
         requires_approval=(mode != PublishingMode.AUTHORIZED_AUTONOMOUS),
     )
     db.add(run)
@@ -197,10 +200,92 @@ async def approve_run(db: AsyncSession, run: PublishingRun, approver_user_id: uu
     run.requires_approval = False
     run.approved_by_user_id = approver_user_id
     run.approved_at = datetime.now(UTC)
-    run.state = PublishingState.READY
+    # A future scheduled_at must NOT publish immediately -- it sits in
+    # SCHEDULED until poll_and_dispatch_due_scheduled_runs atomically
+    # claims it once due. A scheduled_at already in the past (or none at
+    # all) is immediately eligible, matching the pre-scheduling behavior.
+    if run.scheduled_at and ensure_aware(run.scheduled_at) > datetime.now(UTC):
+        run.state = PublishingState.SCHEDULED
+    else:
+        run.state = PublishingState.READY
     await db.commit()
     await db.refresh(run)
+    await audit_service.record(
+        db, action_type="publishing_approve", result="success", user_id=approver_user_id,
+        channel_id=run.channel_id, after_state={"state": run.state.value, "scheduled_at": str(run.scheduled_at)},
+    )
     return run
+
+
+async def cancel_run(db: AsyncSession, run: PublishingRun, user_id: uuid.UUID) -> PublishingRun:
+    """Only reversible before an upload has actually started -- once
+    bytes are in flight (UPLOAD_QUEUED or later) cancelling here would
+    desync CreatorOS's state from what YouTube is actually doing."""
+    if run.state not in (PublishingState.DRAFT, PublishingState.READY, PublishingState.SCHEDULED):
+        raise ConflictError(f"Cannot cancel a run in state {run.state.value}")
+    run.state = PublishingState.CANCELLED
+    run.cancelled_by_user_id = user_id
+    run.cancelled_at = datetime.now(UTC)
+    await db.commit()
+    await db.refresh(run)
+    await audit_service.record(
+        db, action_type="publishing_cancel", result="success", user_id=user_id, channel_id=run.channel_id,
+    )
+    return run
+
+
+async def reschedule_run(
+    db: AsyncSession, run: PublishingRun, user_id: uuid.UUID, new_scheduled_at: datetime | None
+) -> PublishingRun:
+    if run.state not in (PublishingState.DRAFT, PublishingState.READY, PublishingState.SCHEDULED):
+        raise ConflictError(f"Cannot reschedule a run in state {run.state.value}")
+    run.scheduled_at = new_scheduled_at
+    if not run.requires_approval:
+        # Already approved -- re-apply the same immediate-vs-scheduled
+        # rule approve_run uses, since the schedule just changed.
+        if new_scheduled_at and ensure_aware(new_scheduled_at) > datetime.now(UTC):
+            run.state = PublishingState.SCHEDULED
+        else:
+            run.state = PublishingState.READY
+    await db.commit()
+    await db.refresh(run)
+    await audit_service.record(
+        db, action_type="publishing_reschedule", result="success", user_id=user_id,
+        channel_id=run.channel_id, after_state={"scheduled_at": str(new_scheduled_at)},
+    )
+    return run
+
+
+async def claim_due_scheduled_run_ids(db: AsyncSession) -> list[uuid.UUID]:
+    """Atomically claims every SCHEDULED run whose scheduled_at has
+    passed, transitioning each to READY in one UPDATE ... WHERE state
+    check per row so two overlapping poll ticks (or poll workers) can
+    never both claim -- and therefore never both execute -- the same
+    run. Returns the claimed ids for the caller to dispatch execution
+    for, one Celery task per run (so a slow/failing upload never blocks
+    the rest of the batch)."""
+    from sqlalchemy import update
+
+    now = datetime.now(UTC)
+    due_ids = list(
+        await db.scalars(
+            select(PublishingRun.id).where(
+                PublishingRun.state == PublishingState.SCHEDULED,
+                PublishingRun.scheduled_at <= now,
+            )
+        )
+    )
+    claimed: list[uuid.UUID] = []
+    for run_id in due_ids:
+        result = await db.execute(
+            update(PublishingRun)
+            .where(PublishingRun.id == run_id, PublishingRun.state == PublishingState.SCHEDULED)
+            .values(state=PublishingState.READY)
+        )
+        if result.rowcount == 1:
+            claimed.append(run_id)
+    await db.commit()
+    return claimed
 
 
 async def execute_run(db: AsyncSession, run: PublishingRun) -> tuple[PublishingRun, str]:

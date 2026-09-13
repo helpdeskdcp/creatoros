@@ -329,3 +329,23 @@ def poll_pending_publishing_runs_task():
             return await poll_pending_publishing_runs(db)
 
     return _run(_do())
+
+
+@shared_task
+def poll_scheduled_publishing_runs_task():
+    """Real scheduled publishing: SCHEDULED runs sit untouched until this
+    finds scheduled_at <= now, atomically claims them (SCHEDULED -> READY,
+    one UPDATE per row so a run can never be claimed twice even if this
+    task somehow overlaps itself), and dispatches execute_publishing_run
+    for each claimed run separately -- so one slow/failing upload can
+    never block or delay any other creator's scheduled publish."""
+    async def _do():
+        async with WorkerSessionLocal() as db:
+            from app.modules.publishing.service import claim_due_scheduled_run_ids
+
+            claimed = await claim_due_scheduled_run_ids(db)
+        for run_id in claimed:
+            execute_publishing_run.delay(str(run_id))
+        return {"claimed": len(claimed)}
+
+    return _run(_do())
