@@ -11,7 +11,7 @@ from celery import shared_task
 from celery.utils.log import get_task_logger
 from sqlalchemy import select
 
-from app.db.session import AsyncSessionLocal
+from app.jobs.db import WorkerSessionLocal
 from app.jobs.models import Job, JobStatus
 
 logger = get_task_logger(__name__)
@@ -23,7 +23,7 @@ def _run(coro):
 
 
 async def _start_job(job_type: str, owner_user_id: uuid.UUID | None, idempotency_key: str | None, args: dict) -> Job:
-    async with AsyncSessionLocal() as db:
+    async with WorkerSessionLocal() as db:
         if idempotency_key:
             existing = await db.scalar(select(Job).where(Job.idempotency_key == idempotency_key))
             if existing and existing.status in (JobStatus.SUCCEEDED, JobStatus.RUNNING):
@@ -45,7 +45,7 @@ async def _start_job(job_type: str, owner_user_id: uuid.UUID | None, idempotency
 async def _finish_job(
     job_id: uuid.UUID, status: JobStatus, result: dict | None = None, error: str | None = None
 ) -> None:
-    async with AsyncSessionLocal() as db:
+    async with WorkerSessionLocal() as db:
         job = await db.get(Job, job_id)
         if not job:
             return
@@ -67,7 +67,7 @@ def youtube_sync(self, channel_id: str, owner_user_id: str | None = None):
                                 {"channel_id": channel_id})
         if job.status == JobStatus.SUCCEEDED:
             return job
-        async with AsyncSessionLocal() as db:
+        async with WorkerSessionLocal() as db:
             from app.modules.channels.service import sync_channel
 
             channel = await sync_channel(db, uuid.UUID(channel_id))
@@ -84,7 +84,7 @@ def youtube_sync(self, channel_id: str, owner_user_id: str | None = None):
 @shared_task(bind=True, max_retries=3, default_retry_delay=120)
 def sync_all_channels(self):
     async def _do():
-        async with AsyncSessionLocal() as db:
+        async with WorkerSessionLocal() as db:
             from app.modules.channels.models import Channel
 
             channel_ids = list(await db.scalars(select(Channel.id)))
@@ -98,7 +98,7 @@ def sync_all_channels(self):
 @shared_task(bind=True, max_retries=5, default_retry_delay=60)
 def competitor_sync(self, competitor_id: str, owner_user_id: str | None = None):
     async def _do():
-        async with AsyncSessionLocal() as db:
+        async with WorkerSessionLocal() as db:
             from app.modules.competitors.service import sync_competitor
 
             await sync_competitor(db, uuid.UUID(competitor_id))
@@ -113,7 +113,7 @@ def competitor_sync(self, competitor_id: str, owner_user_id: str | None = None):
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
 def trend_refresh(self, owner_user_id: str):
     async def _do():
-        async with AsyncSessionLocal() as db:
+        async with WorkerSessionLocal() as db:
             from app.modules.trends.service import refresh_trends
 
             trends = await refresh_trends(db, uuid.UUID(owner_user_id))
@@ -129,7 +129,7 @@ def trend_refresh(self, owner_user_id: str):
 @shared_task(bind=True, max_retries=3, default_retry_delay=300)
 def refresh_all_trends(self):
     async def _do():
-        async with AsyncSessionLocal() as db:
+        async with WorkerSessionLocal() as db:
             from app.modules.users.models import User
 
             user_ids = list(await db.scalars(select(User.id)))
@@ -143,7 +143,7 @@ def refresh_all_trends(self):
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
 def analytics_sync(self, channel_id: str):
     async def _do():
-        async with AsyncSessionLocal() as db:
+        async with WorkerSessionLocal() as db:
             from app.modules.analytics.service import take_snapshot
             from app.modules.channels.models import Channel
 
@@ -161,7 +161,7 @@ def analytics_sync(self, channel_id: str):
 @shared_task(bind=True, max_retries=2, default_retry_delay=120)
 def recommendation_refresh(self, owner_user_id: str):
     async def _do():
-        async with AsyncSessionLocal() as db:
+        async with WorkerSessionLocal() as db:
             from app.ai.orchestrator import build_orchestrator
             from app.modules.recommendations.service import generate_next_best_videos
 
@@ -182,7 +182,7 @@ def report_generation(owner_user_id: str):
     growth scorecard per connected channel and queues a WEEKLY_REPORT
     notification. Intentionally simple — see docs/ROADMAP.md."""
     async def _do():
-        async with AsyncSessionLocal() as db:
+        async with WorkerSessionLocal() as db:
             from app.modules.channels.models import Channel
             from app.modules.notifications.models import NotificationChannel, NotificationEvent
             from app.modules.notifications.service import notify
@@ -238,7 +238,7 @@ def run_daily_growth_agent(owner_user_id: str | None = None):
     authorizes AUTHORIZED_AUTONOMOUS execution (checked at execution time by
     the publishing safety gate, not here)."""
     async def _do(uid: uuid.UUID):
-        async with AsyncSessionLocal() as db:
+        async with WorkerSessionLocal() as db:
             from app.modules.analytics.models import GrowthAction
             from app.modules.analytics.service import diagnose_growth
             from app.modules.channels.models import Channel
@@ -269,7 +269,7 @@ def run_daily_growth_agent(owner_user_id: str | None = None):
             return actions_created
 
     async def _do_all():
-        async with AsyncSessionLocal() as db:
+        async with WorkerSessionLocal() as db:
             from app.modules.users.models import User
 
             user_ids = (
