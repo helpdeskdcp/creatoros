@@ -62,6 +62,19 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o-mini"
 
+    # --- Object storage ---
+    # "local" (default, always works) or "s3" (requires the vars below --
+    # falls back to CONFIGURATION_REQUIRED rather than silently using local
+    # storage if selected but unconfigured, since that would surprise an
+    # operator who explicitly asked for S3-backed persistence).
+    storage_backend: str = "local"
+    storage_local_path: str = "storage/uploads"
+    s3_bucket: str = ""
+    s3_region: str = "us-east-1"
+    s3_endpoint_url: str = ""  # set for MinIO/S3-compatible deployments
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+
     # --- Notifications ---
     smtp_host: str = ""
     smtp_port: int = 587
@@ -86,6 +99,10 @@ class Settings(BaseSettings):
     @property
     def openai_configured(self) -> bool:
         return bool(self.openai_api_key)
+
+    @property
+    def s3_configured(self) -> bool:
+        return bool(self.s3_bucket and self.aws_access_key_id and self.aws_secret_access_key)
 
 
 @lru_cache

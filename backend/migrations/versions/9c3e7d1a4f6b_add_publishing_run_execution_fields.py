@@ -17,7 +17,6 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column('publishing_runs', sa.Column('video_file_path', sa.String(length=500), nullable=True))
     op.add_column('publishing_runs', sa.Column('published_url', sa.String(length=300), nullable=True))
     op.add_column('publishing_runs', sa.Column('published_at', sa.DateTime(timezone=True), nullable=True))
 
@@ -25,4 +24,3 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_column('publishing_runs', 'published_at')
     op.drop_column('publishing_runs', 'published_url')
-    op.drop_column('publishing_runs', 'video_file_path')

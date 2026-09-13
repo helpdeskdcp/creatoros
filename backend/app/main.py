@@ -59,6 +59,7 @@ def _register_routers(app: FastAPI, settings) -> None:
     from app.modules.distribution.router import router as distribution_router
     from app.modules.experiments.router import router as experiments_router
     from app.modules.hooks.router import router as hooks_router
+    from app.modules.media.router import router as media_router
     from app.modules.notifications.router import router as notifications_router
     from app.modules.publishing.router import router as publishing_router
     from app.modules.recommendations.router import router as recommendations_router
@@ -101,6 +102,7 @@ def _register_routers(app: FastAPI, settings) -> None:
         notifications_router, prefix=f"{prefix}/notifications", tags=["notifications"]
     )
     app.include_router(audit_router, prefix=f"{prefix}/audit", tags=["audit"])
+    app.include_router(media_router, prefix=f"{prefix}/media", tags=["media"])
     app.include_router(publishing_router, prefix=f"{prefix}/publishing", tags=["publishing"])
     app.include_router(distribution_router, prefix=f"{prefix}/distribution", tags=["distribution"])
     app.include_router(settings_router, prefix=f"{prefix}/settings", tags=["settings"])

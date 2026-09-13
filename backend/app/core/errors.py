@@ -38,6 +38,11 @@ class ForbiddenError(AppError):
         super().__init__("forbidden", message, status.HTTP_403_FORBIDDEN)
 
 
+class ValidationError(AppError):
+    def __init__(self, message: str = "Invalid input"):
+        super().__init__("invalid_input", message, status.HTTP_400_BAD_REQUEST)
+
+
 def _envelope(request: Request, code: str, message: str) -> dict:
     request_id = getattr(request.state, "request_id", None)
     return {"error": {"code": code, "message": message, "request_id": request_id}}

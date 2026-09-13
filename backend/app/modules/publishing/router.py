@@ -54,9 +54,16 @@ async def create_run(
     user: User = Depends(require_editor),
 ):
     await get_owned_or_404(db, Channel, payload.channel_id, user.id)
-    metadata = payload.model_dump(exclude={"channel_id", "content_item_id", "mode", "idempotency_key"})
+    if payload.media_asset_id:
+        from app.modules.media.models import MediaAsset
+
+        await get_owned_or_404(db, MediaAsset, payload.media_asset_id, user.id)
+    metadata = payload.model_dump(
+        exclude={"channel_id", "content_item_id", "mode", "idempotency_key", "media_asset_id"}
+    )
     return await service.create_run(
-        db, user.id, payload.channel_id, payload.content_item_id, payload.mode, metadata, payload.idempotency_key
+        db, user.id, payload.channel_id, payload.content_item_id, payload.mode, metadata,
+        payload.idempotency_key, media_asset_id=payload.media_asset_id,
     )
 
 

@@ -67,7 +67,7 @@ async def create_run(
     mode: PublishingMode,
     metadata: dict,
     idempotency_key: str,
-    video_file_path: str | None = None,
+    media_asset_id: uuid.UUID | None = None,
 ) -> PublishingRun:
     existing = await db.scalar(
         select(PublishingRun).where(PublishingRun.idempotency_key == idempotency_key)
@@ -83,7 +83,7 @@ async def create_run(
         mode=mode,
         state=PublishingState.DRAFT,
         metadata_json=json.dumps(metadata),
-        video_file_path=video_file_path,
+        video_media_asset_id=media_asset_id,
         requires_approval=(mode != PublishingMode.AUTHORIZED_AUTONOMOUS),
     )
     db.add(run)
@@ -233,17 +233,29 @@ async def execute_run(db: AsyncSession, run: PublishingRun) -> tuple[PublishingR
     run.state = PublishingState.VALIDATING
     await db.commit()
 
-    if not run.video_file_path or not os.path.isfile(run.video_file_path):
+    video_file_path = None
+    if run.video_media_asset_id:
+        from app.modules.media.models import MediaAsset
+        from app.modules.media.service import local_path_for
+
+        asset = await db.get(MediaAsset, run.video_media_asset_id)
+        # Re-verify ownership here too, not just at upload/create time --
+        # defense in depth against a run somehow referencing another
+        # user's asset id.
+        if asset and asset.owner_user_id == run.owner_user_id:
+            video_file_path = local_path_for(asset)
+
+    if not video_file_path or not os.path.isfile(video_file_path):
         run.state = PublishingState.FAILED
         run.failure_reason = (
             "CONFIGURATION_REQUIRED: no source video file available to upload -- "
-            "CreatorOS has no video-upload/content-factory pipeline producing files yet"
+            "upload one via POST /media/upload and reference it as media_asset_id"
         )
         await db.commit()
         await record_attempt(db, run, True, checks, "configuration_required", run.failure_reason)
         return run, "configuration_required"
 
-    ext = os.path.splitext(run.video_file_path)[1].lower()
+    ext = os.path.splitext(video_file_path)[1].lower()
     if ext not in _ALLOWED_VIDEO_EXTENSIONS:
         run.state = PublishingState.FAILED
         run.failure_reason = f"Rejected file type '{ext}' -- allowed: {sorted(_ALLOWED_VIDEO_EXTENSIONS)}"
@@ -251,7 +263,7 @@ async def execute_run(db: AsyncSession, run: PublishingRun) -> tuple[PublishingR
         await record_attempt(db, run, True, checks, "failed", run.failure_reason)
         return run, "failed"
 
-    file_size = os.path.getsize(run.video_file_path)
+    file_size = os.path.getsize(video_file_path)
     if file_size == 0 or file_size > _MAX_UPLOAD_BYTES:
         run.state = PublishingState.FAILED
         run.failure_reason = f"Rejected file size {file_size} bytes"
@@ -283,7 +295,7 @@ async def execute_run(db: AsyncSession, run: PublishingRun) -> tuple[PublishingR
         run.state = PublishingState.UPLOADING
         await db.commit()
         result = await provider.upload_video(
-            session, run.video_file_path, _ALLOWED_VIDEO_EXTENSIONS[ext]
+            session, video_file_path, _ALLOWED_VIDEO_EXTENSIONS[ext]
         )
         run.youtube_video_id = result.youtube_video_id
 

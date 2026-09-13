@@ -44,7 +44,7 @@ class CreatePublishingRunRequest(BaseModel):
     thumbnail_path: str | None = None
     content_score: float = 0.0
     subscriber_score: float = 0.0
-    video_file_path: str | None = None
+    media_asset_id: uuid.UUID | None = None
 
 
 class PublishingRunOut(BaseModel):

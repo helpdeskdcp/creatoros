@@ -82,11 +82,14 @@ class PublishingRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     youtube_video_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Path to the actual video file to upload. CreatorOS has no
-    # video-upload/content-factory pipeline producing these yet (see
-    # docs/) -- a run with no file, or a missing file, is refused
-    # execution with CONFIGURATION_REQUIRED rather than faking a publish.
-    video_file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # References an uploaded, ownership-checked MediaAsset -- deliberately
+    # NOT a raw client-suppliable filesystem path, which would let a
+    # caller ask CreatorOS to "upload" an arbitrary server file to
+    # YouTube. execute_run() re-verifies ownership again at execution
+    # time regardless (defense in depth).
+    video_media_asset_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("media_assets.id", ondelete="SET NULL"), nullable=True
+    )
     published_url: Mapped[str | None] = mapped_column(String(300), nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
