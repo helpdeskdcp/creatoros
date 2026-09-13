@@ -57,3 +57,4 @@ secrets/
 # Local sqlite dev db
 *.db
 *.sqlite3
+backend/storage/
