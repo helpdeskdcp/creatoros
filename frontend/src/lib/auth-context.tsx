@@ -9,6 +9,7 @@ interface AuthContextValue {
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string, fullName?: string) => Promise<void>;
+  completeGoogleSignIn: (accessToken: string) => Promise<void>;
   logout: () => Promise<void>;
 }
 
@@ -53,6 +54,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(res.user);
   }, []);
 
+  const completeGoogleSignIn = useCallback(async (accessToken: string) => {
+    // The backend already issued this token via the OAuth redirect (and
+    // set the refresh-token cookie on that same response) -- this just
+    // adopts it into the SPA's normal auth state, the same as a password
+    // login would.
+    setAccessToken(accessToken);
+    const me = await api.get<User>("/auth/me");
+    setUser(me);
+  }, []);
+
   const logout = useCallback(async () => {
     try {
       await api.post("/auth/logout");
@@ -63,7 +74,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, isLoading, login, register, logout }}>
+    <AuthContext.Provider value={{ user, isLoading, login, register, completeGoogleSignIn, logout }}>
       {children}
     </AuthContext.Provider>
   );

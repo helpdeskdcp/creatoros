@@ -1,4 +1,6 @@
-"""Auth business logic: registration, login, refresh rotation, logout."""
+"""Auth business logic: registration, login, refresh rotation, logout,
+Google Sign-In."""
+import secrets
 import uuid
 from datetime import UTC, datetime
 
@@ -19,27 +21,49 @@ from app.modules.billing.service import ensure_personal_organization
 from app.modules.users.models import User, UserRole, UserSession
 
 
+async def _create_user_and_org(db: AsyncSession, email: str, hashed_password: str, full_name: str | None) -> User:
+    """Shared by password registration and Google Sign-In auto-registration
+    so the security-sensitive first-user-becomes-OWNER rule and the
+    personal-organization bootstrap live in exactly one place."""
+    user_count = await db.scalar(select(func.count()).select_from(User))
+    role = UserRole.OWNER if user_count == 0 else UserRole.VIEWER
+
+    user = User(email=email, hashed_password=hashed_password, full_name=full_name, role=role)
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    await ensure_personal_organization(db, user.id)
+    return user
+
+
 async def register_user(
     db: AsyncSession, email: str, password: str, full_name: str | None
 ) -> User:
     existing = await db.scalar(select(User).where(User.email == email))
     if existing:
         raise ConflictError("An account with this email already exists")
+    return await _create_user_and_org(db, email, hash_password(password), full_name)
 
-    user_count = await db.scalar(select(func.count()).select_from(User))
-    role = UserRole.OWNER if user_count == 0 else UserRole.VIEWER
 
-    user = User(
-        email=email,
-        hashed_password=hash_password(password),
-        full_name=full_name,
-        role=role,
-    )
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
-    await ensure_personal_organization(db, user.id)
-    return user
+async def login_or_register_via_google(
+    db: AsyncSession, email: str, full_name: str | None, email_verified: bool
+) -> User:
+    """Google Sign-In: an existing account with this email logs straight
+    in; a new email auto-registers exactly like password registration
+    (same first-user-becomes-OWNER rule, same personal org bootstrap) but
+    with an unusable random password hash -- this account can only ever
+    be accessed via Google, never a guessed/brute-forced password."""
+    if not email_verified:
+        raise UnauthorizedError("Google account email is not verified")
+
+    existing = await db.scalar(select(User).where(User.email == email))
+    if existing:
+        if not existing.is_active:
+            raise UnauthorizedError("This account has been deactivated")
+        return existing
+
+    unusable_password_hash = hash_password(secrets.token_urlsafe(32))
+    return await _create_user_and_org(db, email, unusable_password_hash, full_name)
 
 
 async def authenticate_user(db: AsyncSession, email: str, password: str) -> User:

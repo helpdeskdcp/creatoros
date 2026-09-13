@@ -1,11 +1,19 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { Suspense, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { Button, Input } from "@/components/ui";
+import { GoogleSignInButton } from "@/components/google-signin-button";
+
+function GoogleErrorBanner() {
+  const searchParams = useSearchParams();
+  const googleError = searchParams.get("google_error");
+  if (!googleError) return null;
+  return <p className="mt-3 text-sm text-red-600 dark:text-red-400">Google sign-in failed: {googleError}</p>;
+}
 
 export default function LoginPage() {
   const { login } = useAuth();
@@ -33,7 +41,18 @@ export default function LoginPage() {
     <div className="flex min-h-screen items-center justify-center px-4">
       <div className="card w-full max-w-sm p-6">
         <h1 className="text-xl font-bold">Sign in to CreatorOS</h1>
-        <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+        <Suspense fallback={null}>
+          <GoogleErrorBanner />
+        </Suspense>
+        <div className="mt-6">
+          <GoogleSignInButton />
+        </div>
+        <div className="my-4 flex items-center gap-2 text-xs muted">
+          <div className="h-px flex-1" style={{ backgroundColor: "rgb(var(--border))" }} />
+          or
+          <div className="h-px flex-1" style={{ backgroundColor: "rgb(var(--border))" }} />
+        </div>
+        <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label className="mb-1 block text-sm font-medium">Email</label>
             <Input

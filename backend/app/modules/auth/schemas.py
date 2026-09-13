@@ -31,3 +31,7 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     expires_in: int
     user: UserOut
+
+
+class GoogleAuthorizeResponse(BaseModel):
+    authorize_url: str

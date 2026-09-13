@@ -6,6 +6,7 @@ import { useState } from "react";
 import { ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { Button, Input } from "@/components/ui";
+import { GoogleSignInButton } from "@/components/google-signin-button";
 
 export default function RegisterPage() {
   const { register } = useAuth();
@@ -35,7 +36,15 @@ export default function RegisterPage() {
       <div className="card w-full max-w-sm p-6">
         <h1 className="text-xl font-bold">Create your CreatorOS account</h1>
         <p className="mt-1 text-sm muted">The first account created becomes the channel owner.</p>
-        <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+        <div className="mt-6">
+          <GoogleSignInButton />
+        </div>
+        <div className="my-4 flex items-center gap-2 text-xs muted">
+          <div className="h-px flex-1" style={{ backgroundColor: "rgb(var(--border))" }} />
+          or
+          <div className="h-px flex-1" style={{ backgroundColor: "rgb(var(--border))" }} />
+        </div>
+        <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label className="mb-1 block text-sm font-medium">Full name</label>
             <Input value={fullName} onChange={(e) => setFullName(e.target.value)} />

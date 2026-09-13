@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     youtube_client_id: str = ""
     youtube_client_secret: str = ""
     youtube_redirect_uri: str = "http://localhost:8000/api/v1/channels/oauth/callback"
+    # Separate redirect for Google Sign-In (login/registration) vs. the
+    # YouTube channel-connection flow above -- same OAuth client, two
+    # different registered redirect URIs, two different scope sets.
+    google_signin_redirect_uri: str = "http://localhost:8000/api/v1/auth/google/callback"
     youtube_api_key: str = ""
     # CreatorOS has no way to query Google's own OAuth consent-screen
     # publishing status (that lives entirely in Google Cloud Console, behind
