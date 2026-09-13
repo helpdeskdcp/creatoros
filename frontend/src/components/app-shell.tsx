@@ -56,6 +56,7 @@ const NAV_SECTIONS: { label: string; items: { href: string; label: string }[] }[
   {
     label: "System",
     items: [
+      { href: "/approvals", label: "Approval Center" },
       { href: "/settings", label: "Control Center" },
       { href: "/audit", label: "Audit Log" },
       { href: "/billing", label: "Billing" },
