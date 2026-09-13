@@ -30,6 +30,7 @@ async def generate_seo(
         system_prompt=SYSTEM_PROMPT,
         user_prompt=f"Video title: {title}\nVideo description/summary: {description}",
         schema=_GeneratedSeo,
+        user_id=owner_user_id,
     )
 
     record = SeoRecord(

@@ -44,7 +44,14 @@ async def record(
     failure_reason: str | None = None,
     before_state: dict | None = None,
     after_state: dict | None = None,
+    commit: bool = True,
 ) -> AuditLog:
+    """`commit=False` for callers that manage their own transaction
+    boundary (e.g. cached_generate(), which batches several DB writes
+    before a single commit at the end) — the entry is still flushed so it
+    has an id/timestamp, but nothing is finalized until the caller's own
+    commit. Defaults to True to preserve every existing call site's
+    behavior."""
     entry = AuditLog(
         created_at=datetime.now(UTC),
         user_id=user_id,
@@ -62,8 +69,11 @@ async def record(
         after_state_json=json.dumps(_scrub(after_state)) if after_state else None,
     )
     db.add(entry)
-    await db.commit()
-    await db.refresh(entry)
+    if commit:
+        await db.commit()
+        await db.refresh(entry)
+    else:
+        await db.flush()
     return entry
 
 

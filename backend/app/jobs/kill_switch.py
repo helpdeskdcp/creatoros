@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.jobs.models import KillSwitch
+from app.modules.audit import service as audit_service
 
 
 async def get_or_create(db: AsyncSession, owner_user_id: uuid.UUID) -> KillSwitch:
@@ -32,6 +33,10 @@ async def activate(db: AsyncSession, owner_user_id: uuid.UUID, reason: str | Non
     switch.reason = reason
     await db.commit()
     await db.refresh(switch)
+    await audit_service.record(
+        db, action_type="kill_switch_activate", result="success", user_id=owner_user_id,
+        after_state={"reason": reason},
+    )
     return switch
 
 
@@ -42,4 +47,7 @@ async def deactivate(db: AsyncSession, owner_user_id: uuid.UUID) -> KillSwitch:
     switch.reason = None
     await db.commit()
     await db.refresh(switch)
+    await audit_service.record(
+        db, action_type="kill_switch_deactivate", result="success", user_id=owner_user_id,
+    )
     return switch

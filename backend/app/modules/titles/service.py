@@ -31,6 +31,7 @@ async def generate_titles(
         system_prompt=SYSTEM_PROMPT,
         user_prompt=f"Topic: {topic}\nGenerate exactly {count} title candidates.",
         schema=GeneratedTitlesResponse,
+        user_id=owner_user_id,
     )
 
     titles: list[Title] = []

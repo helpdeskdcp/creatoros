@@ -69,6 +69,7 @@ async def generate_assets(
         system_prompt=SYSTEM_PROMPT,
         user_prompt=user_prompt,
         schema=GeneratedAssetsResponse,
+        user_id=campaign.owner_user_id,
     )
 
     assets: list[DistributionAsset] = []

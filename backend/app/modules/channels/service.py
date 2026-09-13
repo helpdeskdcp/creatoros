@@ -16,6 +16,7 @@ from app.core.timeutils import ensure_aware
 from app.modules.channels.models import Channel, SyncStatus
 from app.modules.channels.providers import get_youtube_provider
 from app.modules.channels.providers.base import YouTubeProviderError
+from app.modules.audit import service as audit_service
 from app.modules.videos.models import Video, VideoFormat, VideoMetricSnapshot
 
 logger = get_logger("channels.service")
@@ -55,8 +56,15 @@ async def get_oauth_authorize_url(user_id: uuid.UUID) -> tuple[str, str]:
 
 async def connect_channel_via_oauth(db: AsyncSession, user_id: uuid.UUID, code: str) -> Channel:
     provider = get_youtube_provider()
-    tokens = await provider.exchange_oauth_code(code)
-    channel_data = await provider.get_channel(access_token=tokens.access_token)
+    try:
+        tokens = await provider.exchange_oauth_code(code)
+        channel_data = await provider.get_channel(access_token=tokens.access_token)
+    except YouTubeProviderError as exc:
+        await audit_service.record(
+            db, action_type="oauth_connect", result="failure", user_id=user_id,
+            provider="youtube", failure_reason=str(exc),
+        )
+        raise
 
     existing = await db.scalar(
         select(Channel).where(Channel.youtube_channel_id == channel_data.youtube_channel_id)
@@ -66,6 +74,11 @@ async def connect_channel_via_oauth(db: AsyncSession, user_id: uuid.UUID, code: 
         # already connected must never silently transfer ownership or
         # overwrite their tokens with this user's.
         if existing.owner_user_id != user_id:
+            await audit_service.record(
+                db, action_type="oauth_connect", result="blocked", user_id=user_id,
+                channel_id=existing.id, provider="youtube",
+                failure_reason="Channel already connected to a different CreatorOS account",
+            )
             raise ConflictError(
                 "This YouTube channel is already connected to a different CreatorOS account"
             )
@@ -88,6 +101,11 @@ async def connect_channel_via_oauth(db: AsyncSession, user_id: uuid.UUID, code: 
 
     await db.commit()
     await db.refresh(channel)
+
+    await audit_service.record(
+        db, action_type="oauth_connect", result="success", user_id=user_id,
+        channel_id=channel.id, provider="youtube",
+    )
     return channel
 
 

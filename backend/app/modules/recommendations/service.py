@@ -88,6 +88,7 @@ async def generate_next_best_videos(
             system_prompt=SYSTEM_PROMPT,
             user_prompt=user_prompt,
             schema=_GeneratedRecommendationDetail,
+            user_id=owner_user_id,
         )
 
         rec = Recommendation(

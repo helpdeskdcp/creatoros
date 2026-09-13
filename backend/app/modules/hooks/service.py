@@ -36,6 +36,7 @@ async def generate_hooks(
         system_prompt=SYSTEM_PROMPT,
         user_prompt=user_prompt,
         schema=GeneratedHooksResponse,
+        user_id=owner_user_id,
     )
 
     hooks: list[Hook] = []

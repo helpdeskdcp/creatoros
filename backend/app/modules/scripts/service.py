@@ -79,6 +79,7 @@ async def _generate_version(
         user_prompt=user_prompt,
         schema=_GeneratedScript,
         max_tokens=3000,
+        user_id=owner_user_id,
     )
 
     full_text = "\n\n".join(

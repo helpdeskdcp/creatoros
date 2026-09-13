@@ -33,6 +33,7 @@ async def generate_thumbnail_brief(
         system_prompt=SYSTEM_PROMPT,
         user_prompt=user_prompt,
         schema=_GeneratedThumbnailBrief,
+        user_id=owner_user_id,
     )
 
     brief = ThumbnailBrief(
