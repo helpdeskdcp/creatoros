@@ -8,7 +8,7 @@ import os
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from celery import shared_task
 from celery.utils.log import get_task_logger
@@ -508,6 +508,49 @@ def measure_video_update_impact_task():
                         errors += 1
             result["measured"] = measured
             result["errors"] = errors
+        return result
+
+    return _run(_do())
+
+
+@shared_task
+def detect_performance_anomalies_task():
+    """Alert Engine: flags a video whose view velocity materially
+    accelerated or declined vs. its own prior window (see
+    analytics.service.detect_performance_anomalies -- never a fabricated
+    threshold, requires 3 real snapshots). Rate-limited per (user, video,
+    kind) to once per 24h so a standing anomaly doesn't repeat-notify."""
+    async def _do():
+        async with _tracked_job("detect_performance_anomalies_task") as result:
+            async with WorkerSessionLocal() as db:
+                from app.modules.analytics.service import detect_performance_anomalies
+                from app.modules.channels.models import Channel
+                from app.modules.notifications.models import Notification, NotificationChannel, NotificationEvent
+                from app.modules.notifications.service import notify
+
+                channels = list(await db.scalars(select(Channel)))
+                notified = 0
+                for channel in channels:
+                    anomalies = await detect_performance_anomalies(db, channel)
+                    for a in anomalies:
+                        title = f"{a.kind.title()} detected: {a.video.title}"
+                        recent_dup = await db.scalar(
+                            select(Notification).where(
+                                Notification.user_id == channel.owner_user_id,
+                                Notification.title == title,
+                                Notification.created_at >= datetime.now(UTC) - timedelta(hours=24),
+                            )
+                        )
+                        if recent_dup:
+                            continue
+                        await notify(
+                            db, channel.owner_user_id, NotificationEvent.PERFORMANCE_ANOMALY,
+                            NotificationChannel.IN_APP, title,
+                            f"View velocity {a.recent_velocity:.1f}/day vs. a baseline of "
+                            f"{a.baseline_velocity:.1f}/day ({a.ratio:.1f}x) on \"{a.video.title}\".",
+                        )
+                        notified += 1
+            result["notified"] = notified
         return result
 
     return _run(_do())

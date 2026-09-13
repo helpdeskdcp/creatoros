@@ -59,4 +59,8 @@ celery_app.conf.beat_schedule = {
         "task": "app.jobs.tasks.measure_video_update_impact_task",
         "schedule": 3600.0 * 6,
     },
+    "detect-performance-anomalies": {
+        "task": "app.jobs.tasks.detect_performance_anomalies_task",
+        "schedule": 3600.0 * 3,
+    },
 }

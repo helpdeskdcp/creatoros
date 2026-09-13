@@ -21,6 +21,8 @@ from app.modules.channels.providers import get_youtube_provider
 from app.modules.channels.providers.base import YouTubeProviderError
 from app.modules.channels.service import _get_valid_access_token
 from app.modules.experiments.learning import _upsert_signal
+from app.modules.notifications.models import NotificationChannel, NotificationEvent
+from app.modules.notifications.service import notify
 from app.modules.video_updates.models import (
     VideoUpdateField,
     VideoUpdateImpact,
@@ -139,6 +141,17 @@ async def reject_proposal(db: AsyncSession, proposal_id: uuid.UUID, owner_user_i
     return proposal
 
 
+async def _notify_update_failed(db: AsyncSession, proposal: VideoUpdateProposal, video: Video) -> None:
+    # Reuses PUBLISHING_RESULT rather than adding a new enum value (which
+    # would need an ALTER TYPE migration) -- semantically this is exactly
+    # that category: the result of a YouTube-facing write operation.
+    await notify(
+        db, proposal.owner_user_id, NotificationEvent.PUBLISHING_RESULT, NotificationChannel.IN_APP,
+        f"YouTube update failed for \"{video.title}\"",
+        f"Proposed {proposal.field.value.lower()} change was not applied/verified: {proposal.error_message}",
+    )
+
+
 async def approve_and_execute(
     db: AsyncSession, proposal_id: uuid.UUID, owner_user_id: uuid.UUID
 ) -> VideoUpdateProposal:
@@ -170,6 +183,7 @@ async def approve_and_execute(
             db, action_type="video_update_executed", result="failure", user_id=owner_user_id,
             failure_reason=proposal.error_message,
         )
+        await _notify_update_failed(db, proposal, video)
         return proposal
 
     proposed_value = _decode(proposal.field, proposal.proposed_value)
@@ -213,6 +227,7 @@ async def approve_and_execute(
             db, action_type="video_update_executed", result="failure", user_id=owner_user_id,
             content_id=str(video.youtube_video_id), failure_reason=str(exc),
         )
+        await _notify_update_failed(db, proposal, video)
         return proposal
 
     proposal.executed_at = datetime.now(UTC)
@@ -240,6 +255,8 @@ async def approve_and_execute(
         after_state={"field": proposal.field.value, "value": actual_value if verified else None},
         failure_reason=None if verified else proposal.error_message,
     )
+    if not verified:
+        await _notify_update_failed(db, proposal, video)
     return proposal
 
 

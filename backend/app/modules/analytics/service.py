@@ -368,3 +368,55 @@ async def list_todays_growth_actions(db: AsyncSession, owner_user_id: uuid.UUID)
         .order_by(GrowthAction.priority)
     )
     return list(result)
+
+
+class PerformanceAnomaly:
+    def __init__(self, video: Video, kind: str, baseline_velocity: float, recent_velocity: float, ratio: float) -> None:
+        self.video = video
+        self.kind = kind  # "ACCELERATION" | "DECLINE"
+        self.baseline_velocity = baseline_velocity
+        self.recent_velocity = recent_velocity
+        self.ratio = ratio
+
+
+_ANOMALY_MIN_SNAPSHOTS = 3
+_ACCELERATION_RATIO = 2.5
+_DECLINE_RATIO = 0.4
+_MIN_BASELINE_VELOCITY = 1.0  # views/day -- below this, ratios are noise, not signal
+
+
+async def detect_performance_anomalies(db: AsyncSession, channel: Channel) -> list[PerformanceAnomaly]:
+    """Compares each video's most recent view-velocity window to its own
+    prior window -- never a fabricated threshold, never flagged without
+    at least 3 real snapshots to compare. A ratio close to 1.0 (no real
+    baseline velocity yet) is correctly never flagged."""
+    videos = list(await db.scalars(select(Video).where(Video.channel_id == channel.id)))
+    anomalies: list[PerformanceAnomaly] = []
+
+    for video in videos:
+        snapshots = list(
+            await db.scalars(
+                select(VideoMetricSnapshot)
+                .where(VideoMetricSnapshot.video_id == video.id, VideoMetricSnapshot.view_count.is_not(None))
+                .order_by(VideoMetricSnapshot.captured_at)
+            )
+        )
+        if len(snapshots) < _ANOMALY_MIN_SNAPSHOTS:
+            continue
+
+        latest, prev, prior = snapshots[-1], snapshots[-2], snapshots[-3]
+        recent_span_days = max((latest.captured_at - prev.captured_at).total_seconds() / 86400, 0.01)
+        baseline_span_days = max((prev.captured_at - prior.captured_at).total_seconds() / 86400, 0.01)
+        recent_velocity = max(0, latest.view_count - prev.view_count) / recent_span_days
+        baseline_velocity = max(0, prev.view_count - prior.view_count) / baseline_span_days
+
+        if baseline_velocity < _MIN_BASELINE_VELOCITY:
+            continue  # not enough real signal to call a ratio meaningful
+
+        ratio = recent_velocity / baseline_velocity
+        if ratio >= _ACCELERATION_RATIO:
+            anomalies.append(PerformanceAnomaly(video, "ACCELERATION", baseline_velocity, recent_velocity, ratio))
+        elif ratio <= _DECLINE_RATIO:
+            anomalies.append(PerformanceAnomaly(video, "DECLINE", baseline_velocity, recent_velocity, ratio))
+
+    return anomalies

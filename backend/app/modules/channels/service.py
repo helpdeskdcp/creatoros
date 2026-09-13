@@ -18,6 +18,8 @@ from app.modules.channels.models import Channel, SyncStatus
 from app.modules.channels.providers import get_youtube_provider
 from app.modules.channels.providers.base import YouTubeProviderError
 from app.modules.audit import service as audit_service
+from app.modules.notifications.models import NotificationChannel, NotificationEvent
+from app.modules.notifications.service import notify
 from app.modules.videos.models import Video, VideoFormat, VideoMetricSnapshot
 
 logger = get_logger("channels.service")
@@ -236,6 +238,7 @@ async def sync_channel(db: AsyncSession, channel_id: uuid.UUID) -> Channel:
     if not channel:
         raise NotFoundError("Channel not found")
 
+    was_already_failed = channel.sync_status == SyncStatus.FAILED
     channel.sync_status = SyncStatus.SYNCING
     await db.commit()
 
@@ -305,4 +308,13 @@ async def sync_channel(db: AsyncSession, channel_id: uuid.UUID) -> Channel:
         channel.last_sync_error = str(exc)
         await db.commit()
         logger.error("channel_sync_failed", channel_id=str(channel_id), error=str(exc))
+        # Only on the transition INTO failure, not on every retry of an
+        # already-failed channel -- avoids paging the creator repeatedly
+        # for the same standing problem (mandate: avoid notification spam).
+        if not was_already_failed:
+            await notify(
+                db, channel.owner_user_id, NotificationEvent.SYNC_FAILURE, NotificationChannel.IN_APP,
+                f"Sync failed for {channel.title}",
+                f"CreatorOS could not sync {channel.title} from YouTube: {exc}",
+            )
         raise
