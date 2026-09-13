@@ -57,6 +57,19 @@ export interface VideoOut {
   comment_count: number | null;
 }
 
+export interface FormatStats {
+  video_count: number;
+  total_views: number;
+  avg_views: number | null;
+  avg_engagement_rate: number | null;
+  sample_size_for_averages: number;
+}
+
+export interface ShortsVsLongForm {
+  shorts: FormatStats;
+  long_form: FormatStats;
+}
+
 export interface ChannelIntelligence {
   total_views: Metric;
   subscriber_count: Metric;
@@ -65,7 +78,7 @@ export interface ChannelIntelligence {
   views_velocity_7d: Metric;
   upload_frequency_per_week: Metric;
   engagement_rate: Metric;
-  shorts_vs_long_form_ratio: Metric;
+  shorts_vs_long_form: Metric<ShortsVsLongForm>;
   top_videos: VideoOut[];
   weak_videos: VideoOut[];
 }

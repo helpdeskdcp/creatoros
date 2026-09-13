@@ -18,7 +18,7 @@ from app.core.data_quality import (
 from app.core.timeutils import ensure_aware
 from app.modules.channels.models import Channel
 from app.modules.videos.models import Video, VideoFormat, VideoMetricSnapshot
-from app.modules.videos.schemas import ChannelIntelligence
+from app.modules.videos.schemas import ChannelIntelligence, FormatStats, ShortsVsLongForm
 
 
 async def list_channel_videos(db: AsyncSession, channel_id: uuid.UUID) -> list[Video]:
@@ -57,12 +57,16 @@ async def compute_channel_intelligence(db: AsyncSession, channel: Channel) -> Ch
 
     engagement_metric = _compute_engagement_rate(videos)
 
-    shorts = sum(1 for v in videos if v.format == VideoFormat.SHORT)
-    long_form = sum(1 for v in videos if v.format == VideoFormat.LONG_FORM)
     if n > 0:
-        ratio_metric = real_metric({"shorts": shorts, "long_form": long_form}, n)
+        format_metric = real_metric(
+            ShortsVsLongForm(
+                shorts=_compute_format_stats([v for v in videos if v.format == VideoFormat.SHORT]),
+                long_form=_compute_format_stats([v for v in videos if v.format == VideoFormat.LONG_FORM]),
+            ),
+            n,
+        )
     else:
-        ratio_metric = insufficient_data(0, "No videos synced yet")
+        format_metric = insufficient_data(0, "No videos synced yet")
 
     ranked = sorted((v for v in videos if v.view_count is not None), key=lambda v: v.view_count, reverse=True)
     top_videos = ranked[:5]
@@ -78,7 +82,7 @@ async def compute_channel_intelligence(db: AsyncSession, channel: Channel) -> Ch
         views_velocity_7d=velocity_metric,
         upload_frequency_per_week=upload_freq_metric,
         engagement_rate=engagement_metric,
-        shorts_vs_long_form_ratio=ratio_metric,
+        shorts_vs_long_form=format_metric,
         top_videos=[VideoOut.model_validate(v) for v in top_videos],
         weak_videos=[VideoOut.model_validate(v) for v in weak_videos],
     )
@@ -131,6 +135,33 @@ def _compute_upload_frequency(videos: list[Video]) -> Metric:
 
     per_week = round(len(recent) / (90 / 7), 2)
     return real_metric(per_week, len(recent))
+
+
+def _compute_format_stats(videos: list[Video]) -> FormatStats:
+    """Real per-format aggregates for one format group (Shorts or
+    long-form). Averages are withheld (None) below the same minimum
+    sample size used everywhere else — a format with 1 video doesn't get
+    a trustworthy 'average'."""
+    views = [v.view_count for v in videos if v.view_count is not None]
+    total_views = sum(views) if views else 0
+
+    eligible = [v for v in videos if v.view_count and v.view_count > 0]
+    has_enough = len(eligible) >= MIN_SAMPLE_SIZE_CHANNEL_BENCHMARK
+
+    avg_views = round(statistics.mean(views), 1) if has_enough and views else None
+    avg_engagement_rate = (
+        round(statistics.mean([((v.like_count or 0) + (v.comment_count or 0)) / v.view_count for v in eligible]) * 100, 3)
+        if has_enough
+        else None
+    )
+
+    return FormatStats(
+        video_count=len(videos),
+        total_views=total_views,
+        avg_views=avg_views,
+        avg_engagement_rate=avg_engagement_rate,
+        sample_size_for_averages=len(eligible),
+    )
 
 
 def _compute_engagement_rate(videos: list[Video]) -> Metric:

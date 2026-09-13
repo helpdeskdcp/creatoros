@@ -3,7 +3,12 @@ import type { Metric } from "@/lib/types";
 function formatValue(value: unknown): string {
   if (value === null || value === undefined) return "—";
   if (typeof value === "number") return value.toLocaleString();
-  if (typeof value === "object") return JSON.stringify(value);
+  if (typeof value === "object") {
+    // MetricCard only knows how to render scalars. A structured metric
+    // (like the Shorts vs Long-form comparison) needs its own dedicated
+    // component — never dump raw JSON to the user (see FormatComparisonCard).
+    return "See detail view";
+  }
   return String(value);
 }
 

@@ -23,6 +23,23 @@ class VideoOut(BaseModel):
     comment_count: int | None
 
 
+class FormatStats(BaseModel):
+    """Real per-format aggregates — never a bare count. `avg_views` and
+    `avg_engagement_rate` are None (not zero) when there aren't enough
+    videos of this format to trust an average, same discipline as Metric."""
+
+    video_count: int
+    total_views: int
+    avg_views: float | None
+    avg_engagement_rate: float | None
+    sample_size_for_averages: int
+
+
+class ShortsVsLongForm(BaseModel):
+    shorts: FormatStats
+    long_form: FormatStats
+
+
 class ChannelIntelligence(BaseModel):
     """The Channel Intelligence dashboard payload. Every field is a Metric
     envelope so the frontend always knows whether a number is REAL,
@@ -35,6 +52,6 @@ class ChannelIntelligence(BaseModel):
     views_velocity_7d: Metric
     upload_frequency_per_week: Metric
     engagement_rate: Metric
-    shorts_vs_long_form_ratio: Metric
+    shorts_vs_long_form: Metric[ShortsVsLongForm]
     top_videos: list[VideoOut]
     weak_videos: list[VideoOut]

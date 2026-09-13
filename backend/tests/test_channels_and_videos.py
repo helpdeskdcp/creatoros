@@ -56,6 +56,17 @@ async def test_channel_intelligence_never_fabricates_velocity(client, unique_ema
     assert intel["average_views"]["value"] is not None
     assert len(intel["top_videos"]) == 5
 
+    # Shorts vs Long-form must be a structured breakdown, never a bare
+    # dict the frontend would have to guess the shape of (regression for
+    # the JSON.stringify dashboard bug).
+    format_metric = intel["shorts_vs_long_form"]
+    assert format_metric["quality"] == "REAL"
+    shorts = format_metric["value"]["shorts"]
+    long_form = format_metric["value"]["long_form"]
+    assert shorts["video_count"] + long_form["video_count"] == 10
+    assert "avg_views" in shorts and "avg_engagement_rate" in shorts
+    assert "avg_views" in long_form and "avg_engagement_rate" in long_form
+
 
 @pytest.mark.asyncio
 async def test_channel_not_owned_by_user_returns_404(client, unique_email):

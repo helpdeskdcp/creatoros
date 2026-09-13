@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { AppShell } from "@/components/app-shell";
 import { MetricCard } from "@/components/metric-card";
+import { FormatComparisonCard } from "@/components/format-comparison-card";
 import { PageHeader, LoadingState, ErrorState, EmptyState, Badge } from "@/components/ui";
 import { api } from "@/lib/api";
 import type { Channel, ChannelIntelligence, GrowthDiagnosisOut, Recommendation } from "@/lib/types";
@@ -69,7 +70,7 @@ export default function DashboardPage() {
               <MetricCard label="7-Day View Velocity" metric={intelligenceQuery.data.views_velocity_7d} />
               <MetricCard label="Uploads / Week" metric={intelligenceQuery.data.upload_frequency_per_week} />
               <MetricCard label="Engagement Rate %" metric={intelligenceQuery.data.engagement_rate} />
-              <MetricCard label="Shorts vs Long-form" metric={intelligenceQuery.data.shorts_vs_long_form_ratio} />
+              <FormatComparisonCard metric={intelligenceQuery.data.shorts_vs_long_form} />
             </div>
           )}
 
