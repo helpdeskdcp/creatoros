@@ -10,6 +10,8 @@ interface PublishingRun {
   mode: string;
   state: string;
   youtube_video_id: string | null;
+  published_url: string | null;
+  published_at: string | null;
   failure_reason: string | null;
   requires_approval: boolean;
 }
@@ -37,6 +39,16 @@ export default function PublishingPage() {
           <div key={run.id} className="card flex items-center justify-between p-4 text-sm">
             <div>
               <div className="font-medium">{run.mode}</div>
+              {run.published_url && (
+                <a
+                  href={run.published_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-1 block text-brand-500 hover:underline"
+                >
+                  {run.published_url}
+                </a>
+              )}
               {run.failure_reason && <div className="mt-1 text-red-600 dark:text-red-400">{run.failure_reason}</div>}
             </div>
             <div className="flex items-center gap-2">

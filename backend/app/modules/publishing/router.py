@@ -11,6 +11,7 @@ from app.modules.publishing import service
 from app.modules.publishing.models import PublishingRun
 from app.modules.publishing.schemas import (
     CreatePublishingRunRequest,
+    ExecuteRunResultOut,
     PublishingRuleOut,
     PublishingRunOut,
     SafetyGateResultOut,
@@ -77,3 +78,15 @@ async def approve_run(
 ):
     run = await get_owned_or_404(db, PublishingRun, run_id, user.id)
     return await service.approve_run(db, run, user.id)
+
+
+@router.post("/runs/{run_id}/execute", response_model=ExecuteRunResultOut)
+async def execute_run(
+    run_id: uuid.UUID, db: AsyncSession = Depends(get_db), user: User = Depends(require_editor)
+):
+    """Actually performs the upload for an approved (READY) run. Returns
+    configuration_required (never a fabricated success) if no real video
+    file is available to upload -- see execute_run()'s docstring."""
+    run = await get_owned_or_404(db, PublishingRun, run_id, user.id)
+    run, result = await service.execute_run(db, run)
+    return ExecuteRunResultOut(run=run, result=result)

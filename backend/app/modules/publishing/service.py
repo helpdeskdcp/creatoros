@@ -7,16 +7,21 @@ call is made. A failed gate blocks the action (BLOCK_ACTION) and is always
 recorded, win or lose, in publishing_attempts + audit_logs.
 """
 import json
+import os
 import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging import get_logger
 from app.core.timeutils import ensure_aware
 from app.jobs import kill_switch
 from app.modules.audit import service as audit_service
 from app.modules.channels.models import Channel
+from app.modules.channels.providers import get_youtube_provider
+from app.modules.channels.providers.base import UploadMetadata, YouTubeProviderError
+from app.modules.channels.service import _get_valid_access_token
 from app.modules.publishing.models import (
     PublishingAttempt,
     PublishingMode,
@@ -24,6 +29,11 @@ from app.modules.publishing.models import (
     PublishingRun,
     PublishingState,
 )
+
+logger = get_logger("publishing.service")
+
+_ALLOWED_VIDEO_EXTENSIONS = {".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm"}
+_MAX_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024  # 20GB, YouTube's own ceiling
 
 
 async def get_or_create_rule(db: AsyncSession, owner_user_id: uuid.UUID, channel_id: uuid.UUID) -> PublishingRule:
@@ -57,6 +67,7 @@ async def create_run(
     mode: PublishingMode,
     metadata: dict,
     idempotency_key: str,
+    video_file_path: str | None = None,
 ) -> PublishingRun:
     existing = await db.scalar(
         select(PublishingRun).where(PublishingRun.idempotency_key == idempotency_key)
@@ -72,6 +83,7 @@ async def create_run(
         mode=mode,
         state=PublishingState.DRAFT,
         metadata_json=json.dumps(metadata),
+        video_file_path=video_file_path,
         requires_approval=(mode != PublishingMode.AUTHORIZED_AUTONOMOUS),
     )
     db.add(run)
@@ -189,6 +201,153 @@ async def approve_run(db: AsyncSession, run: PublishingRun, approver_user_id: uu
     await db.commit()
     await db.refresh(run)
     return run
+
+
+async def execute_run(db: AsyncSession, run: PublishingRun) -> tuple[PublishingRun, str]:
+    """Steps 10-13 of the safety gate's own docstring promise, which nothing
+    in the repo ever implemented (confirmed by the production audit: a run
+    could reach READY and never progress further). Returns (run, result)
+    where result is one of: succeeded | processing | failed |
+    configuration_required | blocked.
+
+    Never fabricates success. A run with no real video file to upload is
+    refused with configuration_required, not silently marked published --
+    CreatorOS has no video-upload/content-factory pipeline yet producing
+    files for this to send (see docs/). Whenever a real file IS provided,
+    this performs a genuine upload through the same YouTubeProvider
+    interface OAuth/sync already use -- no separate, parallel integration.
+    """
+    if run.state != PublishingState.READY:
+        return run, "blocked"
+
+    # Re-check the gate at execution time, not just at approval time --
+    # state (kill switch, daily limit, rule expiry) can change in between.
+    passed, checks, block_reason = await run_safety_gate(db, run)
+    if not passed:
+        run.state = PublishingState.FAILED
+        run.failure_reason = f"Safety gate failed at execution time: {block_reason}"
+        await db.commit()
+        await record_attempt(db, run, False, checks, "blocked", run.failure_reason)
+        return run, "blocked"
+
+    run.state = PublishingState.VALIDATING
+    await db.commit()
+
+    if not run.video_file_path or not os.path.isfile(run.video_file_path):
+        run.state = PublishingState.FAILED
+        run.failure_reason = (
+            "CONFIGURATION_REQUIRED: no source video file available to upload -- "
+            "CreatorOS has no video-upload/content-factory pipeline producing files yet"
+        )
+        await db.commit()
+        await record_attempt(db, run, True, checks, "configuration_required", run.failure_reason)
+        return run, "configuration_required"
+
+    ext = os.path.splitext(run.video_file_path)[1].lower()
+    if ext not in _ALLOWED_VIDEO_EXTENSIONS:
+        run.state = PublishingState.FAILED
+        run.failure_reason = f"Rejected file type '{ext}' -- allowed: {sorted(_ALLOWED_VIDEO_EXTENSIONS)}"
+        await db.commit()
+        await record_attempt(db, run, True, checks, "failed", run.failure_reason)
+        return run, "failed"
+
+    file_size = os.path.getsize(run.video_file_path)
+    if file_size == 0 or file_size > _MAX_UPLOAD_BYTES:
+        run.state = PublishingState.FAILED
+        run.failure_reason = f"Rejected file size {file_size} bytes"
+        await db.commit()
+        await record_attempt(db, run, True, checks, "failed", run.failure_reason)
+        return run, "failed"
+
+    channel = await db.get(Channel, run.channel_id)
+    metadata = json.loads(run.metadata_json) if run.metadata_json else {}
+
+    try:
+        access_token = await _get_valid_access_token(db, channel)
+        if not access_token:
+            raise YouTubeProviderError("Channel has no valid OAuth access token")
+
+        provider = get_youtube_provider()
+        run.state = PublishingState.UPLOAD_QUEUED
+        await db.commit()
+
+        upload_metadata = UploadMetadata(
+            title=metadata.get("title", "")[:100],
+            description=metadata.get("description", ""),
+            tags=metadata.get("tags", []),
+            category_id=metadata.get("category_id", "22"),
+            privacy_status=metadata.get("privacy_status", "private"),
+        )
+        session = await provider.prepare_upload(access_token, upload_metadata, file_size)
+
+        run.state = PublishingState.UPLOADING
+        await db.commit()
+        result = await provider.upload_video(
+            session, run.video_file_path, _ALLOWED_VIDEO_EXTENSIONS[ext]
+        )
+        run.youtube_video_id = result.youtube_video_id
+
+        thumbnail_path = metadata.get("thumbnail_path")
+        if thumbnail_path and os.path.isfile(thumbnail_path):
+            try:
+                await provider.set_thumbnail(access_token, result.youtube_video_id, thumbnail_path)
+            except YouTubeProviderError as exc:
+                # Best-effort: a thumbnail failure must never fail an
+                # otherwise-successful upload.
+                logger.warning(
+                    "publishing_thumbnail_set_failed", run_id=str(run.id), error=str(exc)
+                )
+
+        run.state = PublishingState.PROCESSING
+        await db.commit()
+
+        is_live = await provider.verify_publication(result.youtube_video_id)
+    except YouTubeProviderError as exc:
+        run.state = PublishingState.FAILED
+        run.failure_reason = str(exc)
+        await db.commit()
+        await record_attempt(db, run, True, checks, "failed", str(exc))
+        return run, "failed"
+
+    if is_live:
+        run.state = PublishingState.PUBLISHED
+        run.published_url = f"https://www.youtube.com/watch?v={run.youtube_video_id}"
+        run.published_at = datetime.now(UTC)
+        await db.commit()
+        await record_attempt(db, run, True, checks, "succeeded", None)
+        return run, "succeeded"
+
+    # Uploaded, but not yet publicly verifiable -- honest intermediate
+    # state, never a fabricated PUBLISHED. A follow-up check (poll_pending_
+    # publishing_runs) will finalize this once YouTube finishes processing.
+    await db.commit()
+    await record_attempt(db, run, True, checks, "processing", None)
+    return run, "processing"
+
+
+async def poll_pending_publishing_runs(db: AsyncSession) -> int:
+    """Finalizes PROCESSING runs whose video has since become publicly
+    verifiable. Returns the number transitioned to PUBLISHED."""
+    pending = list(
+        await db.scalars(select(PublishingRun).where(PublishingRun.state == PublishingState.PROCESSING))
+    )
+    transitioned = 0
+    for run in pending:
+        if not run.youtube_video_id:
+            continue
+        provider = get_youtube_provider()
+        try:
+            is_live = await provider.verify_publication(run.youtube_video_id)
+        except YouTubeProviderError as exc:
+            logger.warning("publishing_poll_failed", run_id=str(run.id), error=str(exc))
+            continue
+        if is_live:
+            run.state = PublishingState.PUBLISHED
+            run.published_url = f"https://www.youtube.com/watch?v={run.youtube_video_id}"
+            run.published_at = datetime.now(UTC)
+            await db.commit()
+            transitioned += 1
+    return transitioned
 
 
 async def list_runs(db: AsyncSession, owner_user_id: uuid.UUID) -> list[PublishingRun]:

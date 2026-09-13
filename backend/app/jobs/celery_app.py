@@ -43,4 +43,8 @@ celery_app.conf.beat_schedule = {
         "task": "app.jobs.tasks.run_daily_growth_agent",
         "schedule": 3600.0 * 24,
     },
+    "poll-pending-publishing-runs": {
+        "task": "app.jobs.tasks.poll_pending_publishing_runs_task",
+        "schedule": 600.0,
+    },
 }

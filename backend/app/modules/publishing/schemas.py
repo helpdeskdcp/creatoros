@@ -44,6 +44,7 @@ class CreatePublishingRunRequest(BaseModel):
     thumbnail_path: str | None = None
     content_score: float = 0.0
     subscriber_score: float = 0.0
+    video_file_path: str | None = None
 
 
 class PublishingRunOut(BaseModel):
@@ -54,9 +55,16 @@ class PublishingRunOut(BaseModel):
     mode: PublishingMode
     state: PublishingState
     youtube_video_id: str | None
+    published_url: str | None
+    published_at: datetime | None
     failure_reason: str | None
     requires_approval: bool
     approved_at: datetime | None
+
+
+class ExecuteRunResultOut(BaseModel):
+    run: PublishingRunOut
+    result: str  # succeeded | processing | failed | configuration_required | blocked
 
 
 class SafetyGateResultOut(BaseModel):

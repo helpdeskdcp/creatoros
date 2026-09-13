@@ -283,3 +283,49 @@ def run_daily_growth_agent(owner_user_id: str | None = None):
         return total
 
     return _run(_do_all())
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=120)
+def execute_publishing_run(self, run_id: str):
+    """Background execution path for an approved (READY) PublishingRun --
+    the same execute_run() the synchronous POST /runs/{id}/execute endpoint
+    calls, so an autonomous/scheduled trigger and an explicit human click
+    share one real implementation instead of two. Retries only on a
+    transport/provider-level failure (YouTubeProviderError); a run that
+    lands in FAILED/configuration_required is a settled outcome, not
+    something to retry blindly."""
+    async def _do():
+        async with WorkerSessionLocal() as db:
+            from app.modules.channels.providers.base import YouTubeProviderError
+            from app.modules.publishing.models import PublishingRun
+            from app.modules.publishing.service import execute_run
+
+            run = await db.get(PublishingRun, uuid.UUID(run_id))
+            if not run:
+                return {"error": "run not found"}
+            try:
+                run, result = await execute_run(db, run)
+            except YouTubeProviderError as exc:
+                raise exc
+            return {"run_id": str(run.id), "result": result}
+
+    try:
+        return _run(_do())
+    except Exception as exc:  # noqa: BLE001
+        logger.error("execute_publishing_run failed for %s: %s", run_id, exc)
+        raise self.retry(exc=exc) from exc
+
+
+@shared_task
+def poll_pending_publishing_runs_task():
+    """Finalizes runs stuck in PROCESSING once YouTube's own processing
+    completes and the video becomes publicly verifiable -- without this,
+    a successful upload whose verify_publication() wasn't True on the
+    first check would never transition to PUBLISHED."""
+    async def _do():
+        async with WorkerSessionLocal() as db:
+            from app.modules.publishing.service import poll_pending_publishing_runs
+
+            return await poll_pending_publishing_runs(db)
+
+    return _run(_do())
