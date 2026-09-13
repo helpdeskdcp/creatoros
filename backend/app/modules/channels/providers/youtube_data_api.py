@@ -179,6 +179,14 @@ class YouTubeDataAPIProvider(YouTubeProvider):
             if page_token:
                 list_params["pageToken"] = page_token
             resp = await client.get(f"{DATA_API_BASE}/playlistItems", params=list_params)
+            if resp.status_code == 404 and "playlistNotFound" in resp.text:
+                # A channel that has never published a public video has no
+                # resolvable uploads playlist at all -- this is a real,
+                # benign channel state (confirmed via production audit:
+                # channels.list itself returned this same playlist id), not
+                # a sync failure. Report zero videos rather than failing
+                # the whole channel sync.
+                return VideosPage(videos=[], next_page_token=None)
             if resp.status_code != 200:
                 raise YouTubeProviderError(f"Failed to list videos: {resp.text}")
             payload = resp.json()
