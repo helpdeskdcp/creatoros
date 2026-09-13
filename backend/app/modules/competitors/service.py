@@ -1,6 +1,7 @@
 """Competitor tracking + the Competitor Opportunity Engine. Uses only public
 channel/video data reached through the same YouTubeProvider interface as the
 creator's own channel — never private competitor analytics."""
+import re
 import uuid
 from collections import Counter
 from datetime import UTC, datetime, timedelta
@@ -9,30 +10,72 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.data_quality import Metric, insufficient_data, real_metric
-from app.core.errors import ConflictError, NotFoundError
+from app.core.errors import ConflictError, NotFoundError, ValidationError
 from app.core.text import extract_keywords
 from app.core.timeutils import ensure_aware
 from app.modules.channels.models import Channel
 from app.modules.channels.providers import get_youtube_provider
+from app.modules.channels.providers.base import ChannelData, YouTubeProvider
 from app.modules.competitors.models import Competitor, CompetitorSnapshot, CompetitorVideo
 from app.modules.competitors.schemas import ContentGap, FormatBreakdown, GapToTopicResult
 from app.modules.videos.models import Video
 
+_CHANNEL_ID_RE = re.compile(r"^UC[\w-]{22}$")
+_URL_CHANNEL_ID_RE = re.compile(r"youtube\.com/channel/(UC[\w-]{22})")
+_URL_HANDLE_RE = re.compile(r"youtube\.com/@([\w.-]+)")
+_URL_LEGACY_RE = re.compile(r"youtube\.com/(?:c|user)/([\w.-]+)")
+
+
+async def resolve_channel_by_identifier(provider: YouTubeProvider, identifier: str) -> ChannelData:
+    """Accepts a raw channel id (UCxxxx...), an @handle, or a full YouTube
+    URL (/channel/UCxxx, /@handle, /c/name, /user/name) -- a creator never
+    has to know or paste a raw channel id. A bare name that isn't any of
+    these is ambiguous and must go through search_competitor_candidates()
+    instead of being silently auto-resolved to a guess."""
+    identifier = identifier.strip()
+    if _CHANNEL_ID_RE.match(identifier):
+        return await provider.get_channel(channel_id=identifier)
+
+    m = _URL_CHANNEL_ID_RE.search(identifier)
+    if m:
+        return await provider.get_channel(channel_id=m.group(1))
+
+    m = _URL_HANDLE_RE.search(identifier) or _URL_LEGACY_RE.search(identifier)
+    if m:
+        return await provider.get_channel(handle=m.group(1))
+
+    if identifier.startswith("@"):
+        return await provider.get_channel(handle=identifier)
+
+    raise ValidationError(
+        "Could not resolve this as a channel ID, @handle, or YouTube URL -- "
+        "use channel search and select one instead"
+    )
+
+
+async def search_competitor_candidates(query: str, max_results: int = 5) -> list[ChannelData]:
+    provider = get_youtube_provider()
+    return await provider.search_channels(query, max_results)
+
 
 async def add_competitor(
-    db: AsyncSession, owner_user_id: uuid.UUID, youtube_channel_id: str, notes: str | None
+    db: AsyncSession, owner_user_id: uuid.UUID, identifier: str, notes: str | None
 ) -> Competitor:
+    """`identifier` is whatever the creator typed -- a channel id, @handle,
+    or YouTube URL (see resolve_channel_by_identifier). Resolved to a
+    canonical channel BEFORE checking for an existing tracked competitor,
+    so two different inputs that mean the same channel correctly collide."""
+    provider = get_youtube_provider()
+    channel_data = await resolve_channel_by_identifier(provider, identifier)
+
     existing = await db.scalar(
         select(Competitor).where(
             Competitor.owner_user_id == owner_user_id,
-            Competitor.youtube_channel_id == youtube_channel_id,
+            Competitor.youtube_channel_id == channel_data.youtube_channel_id,
         )
     )
     if existing:
         raise ConflictError("This competitor is already tracked")
-
-    provider = get_youtube_provider()
-    channel_data = await provider.get_channel(channel_id=youtube_channel_id)
 
     competitor = Competitor(
         owner_user_id=owner_user_id,

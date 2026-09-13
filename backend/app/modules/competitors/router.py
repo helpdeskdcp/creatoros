@@ -12,6 +12,7 @@ from app.modules.competitors import service
 from app.modules.competitors.models import Competitor, CompetitorVideo
 from app.modules.competitors.schemas import (
     AddCompetitorRequest,
+    ChannelSearchResultOut,
     CompetitorOut,
     CompetitorVideoOut,
     ContentGap,
@@ -28,13 +29,31 @@ async def list_competitors(db: AsyncSession = Depends(get_db), user: User = Depe
     return await list_owned(db, Competitor, user.id)
 
 
+@router.get("/search", response_model=list[ChannelSearchResultOut])
+async def search_channels(
+    q: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+):
+    """Search-by-name step of competitor onboarding: returns candidates
+    for the creator to pick from -- never silently auto-selects one,
+    since a name alone is ambiguous."""
+    results = await service.search_competitor_candidates(q)
+    return [
+        ChannelSearchResultOut(
+            youtube_channel_id=r.youtube_channel_id, title=r.title, description=r.description,
+            thumbnail_url=r.thumbnail_url, subscriber_count=r.subscriber_count,
+            view_count=r.view_count, video_count=r.video_count,
+        )
+        for r in results
+    ]
+
+
 @router.post("", response_model=CompetitorOut, status_code=201)
 async def add_competitor(
     payload: AddCompetitorRequest,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_editor),
 ):
-    return await service.add_competitor(db, user.id, payload.youtube_channel_id, payload.notes)
+    return await service.add_competitor(db, user.id, payload.identifier, payload.notes)
 
 
 @router.post("/{competitor_id}/sync", response_model=CompetitorOut)

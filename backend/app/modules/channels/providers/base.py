@@ -103,9 +103,19 @@ class YouTubeProvider(ABC):
 
     @abstractmethod
     async def get_channel(
-        self, channel_id: str | None = None, access_token: str | None = None
+        self, channel_id: str | None = None, access_token: str | None = None, handle: str | None = None
     ) -> ChannelData:
-        """Fetch a channel by id, or the authorized user's own channel ("mine")."""
+        """Fetch a channel by id, by @handle, or the authorized user's own
+        channel ("mine") when neither is given. Exactly one of channel_id/
+        handle should be passed alongside access_token=None for a public
+        (competitor) lookup -- never requires that channel's own OAuth."""
+
+    @abstractmethod
+    async def search_channels(self, query: str, max_results: int = 5) -> list[ChannelData]:
+        """Public channel search by display name -- used for competitor
+        onboarding so a creator never has to know/paste a raw channel id.
+        Returns candidates in the API's own relevance order; the caller
+        picks one rather than this silently auto-selecting a match."""
 
     @abstractmethod
     async def list_channel_videos(

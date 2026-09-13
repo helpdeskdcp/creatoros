@@ -28,6 +28,16 @@ interface GapToTopicResult {
   reason: string | null;
 }
 
+interface ChannelSearchResult {
+  youtube_channel_id: string;
+  title: string;
+  description: string | null;
+  thumbnail_url: string | null;
+  subscriber_count: number | null;
+  view_count: number | null;
+  video_count: number | null;
+}
+
 function CompetitorStats({ competitorId }: { competitorId: string }) {
   const tractionQuery = useQuery({
     queryKey: ["competitor-traction", competitorId],
@@ -64,8 +74,9 @@ function CompetitorStats({ competitorId }: { competitorId: string }) {
 
 export default function CompetitorsPage() {
   const queryClient = useQueryClient();
-  const [channelId, setChannelId] = useState("");
+  const [identifier, setIdentifier] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [searchResults, setSearchResults] = useState<ChannelSearchResult[] | null>(null);
   const [gapToTopicResults, setGapToTopicResults] = useState<GapToTopicResult[] | null>(null);
 
   const competitorsQuery = useQuery({
@@ -79,12 +90,22 @@ export default function CompetitorsPage() {
   });
 
   const addMutation = useMutation({
-    mutationFn: (id: string) => api.post<Competitor>("/competitors", { youtube_channel_id: id }),
+    mutationFn: (identifierToAdd: string) => api.post<Competitor>("/competitors", { identifier: identifierToAdd }),
     onSuccess: () => {
-      setChannelId("");
+      setIdentifier("");
+      setSearchResults(null);
       queryClient.invalidateQueries({ queryKey: ["competitors"] });
     },
     onError: (err) => setError(err instanceof ApiError ? err.message : "Failed to add competitor"),
+  });
+
+  const searchMutation = useMutation({
+    mutationFn: (query: string) => api.get<ChannelSearchResult[]>(`/competitors/search?q=${encodeURIComponent(query)}`),
+    onSuccess: (results) => {
+      setSearchResults(results);
+      setError(results.length === 0 ? "No channels found for that search." : null);
+    },
+    onError: (err) => setError(err instanceof ApiError ? err.message : "Search failed"),
   });
 
   const syncMutation = useMutation({
@@ -108,20 +129,56 @@ export default function CompetitorsPage() {
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            if (channelId.trim()) addMutation.mutate(channelId.trim());
+            if (identifier.trim()) addMutation.mutate(identifier.trim());
           }}
-          className="flex gap-2"
+          className="flex flex-col gap-2 sm:flex-row"
         >
           <Input
-            placeholder="Competitor YouTube channel ID"
-            value={channelId}
-            onChange={(e) => setChannelId(e.target.value)}
+            placeholder="@handle, YouTube URL, channel ID, or a name to search"
+            value={identifier}
+            onChange={(e) => {
+              setIdentifier(e.target.value);
+              setSearchResults(null);
+            }}
           />
-          <Button type="submit" disabled={addMutation.isPending}>
-            Track
-          </Button>
+          <div className="flex gap-2">
+            <Button type="submit" disabled={addMutation.isPending}>
+              Track
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={searchMutation.isPending || !identifier.trim()}
+              onClick={() => searchMutation.mutate(identifier.trim())}
+            >
+              Search by name
+            </Button>
+          </div>
         </form>
         {error && <p className="mt-2 text-sm text-red-600 dark:text-red-400">{error}</p>}
+
+        {searchResults && searchResults.length > 0 && (
+          <div className="mt-3 space-y-2">
+            <p className="muted text-xs">Select the channel you meant:</p>
+            {searchResults.map((r) => (
+              <div key={r.youtube_channel_id} className="flex items-center justify-between rounded border p-2 text-sm" style={{ borderColor: "rgb(var(--border))" }}>
+                <div>
+                  <div className="font-medium">{r.title}</div>
+                  <div className="muted text-xs">
+                    {r.subscriber_count?.toLocaleString() ?? "—"} subscribers · {r.video_count?.toLocaleString() ?? "—"} videos
+                  </div>
+                </div>
+                <Button
+                  variant="secondary"
+                  disabled={addMutation.isPending}
+                  onClick={() => addMutation.mutate(r.youtube_channel_id)}
+                >
+                  Track this channel
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {competitorsQuery.isLoading && <LoadingState />}

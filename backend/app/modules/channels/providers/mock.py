@@ -54,12 +54,12 @@ class MockYouTubeProvider(YouTubeProvider):
         )
 
     async def get_channel(
-        self, channel_id: str | None = None, access_token: str | None = None
+        self, channel_id: str | None = None, access_token: str | None = None, handle: str | None = None
     ) -> ChannelData:
-        cid = channel_id or "UC_mock_demo_channel"
+        cid = channel_id or (f"UC_mock_for_{handle.lstrip('@')}" if handle else "UC_mock_demo_channel")
         return ChannelData(
             youtube_channel_id=cid,
-            title="Demo Creator Channel",
+            title=f"Demo Creator Channel ({handle})" if handle else "Demo Creator Channel",
             description="A mock channel used for local development and tests.",
             thumbnail_url="https://mock.youtube.local/thumb.jpg",
             country="US",
@@ -67,6 +67,21 @@ class MockYouTubeProvider(YouTubeProvider):
             view_count=1_500_000,
             video_count=42,
         )
+
+    async def search_channels(self, query: str, max_results: int = 5) -> list[ChannelData]:
+        return [
+            ChannelData(
+                youtube_channel_id=f"UC_mock_search_{i}",
+                title=f"{query} Channel {i}",
+                description="A mock search result.",
+                thumbnail_url="https://mock.youtube.local/thumb.jpg",
+                country="US",
+                subscriber_count=1000 * (i + 1),
+                view_count=100_000 * (i + 1),
+                video_count=10 * (i + 1),
+            )
+            for i in range(min(max_results, 3))
+        ]
 
     async def list_channel_videos(
         self, channel_id: str, page_token: str | None = None, max_results: int = 50

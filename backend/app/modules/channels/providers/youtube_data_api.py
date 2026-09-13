@@ -122,11 +122,13 @@ class YouTubeDataAPIProvider(YouTubeProvider):
 
     @_retryable
     async def get_channel(
-        self, channel_id: str | None = None, access_token: str | None = None
+        self, channel_id: str | None = None, access_token: str | None = None, handle: str | None = None
     ) -> ChannelData:
         params = {"part": "snippet,statistics", **self._api_key_params()}
         if channel_id:
             params["id"] = channel_id
+        elif handle:
+            params["forHandle"] = handle if handle.startswith("@") else f"@{handle}"
         else:
             params["mine"] = "true"
 
@@ -153,6 +155,54 @@ class YouTubeDataAPIProvider(YouTubeProvider):
             view_count=_safe_int(stats.get("viewCount")),
             video_count=_safe_int(stats.get("videoCount")),
         )
+
+    @_retryable
+    async def search_channels(self, query: str, max_results: int = 5) -> list[ChannelData]:
+        search_params = {
+            "part": "snippet", "type": "channel", "q": query,
+            "maxResults": max_results, **self._api_key_params(),
+        }
+        async with self._client() as client:
+            search_resp = await client.get(f"{DATA_API_BASE}/search", params=search_params)
+        if search_resp.status_code == 403:
+            raise YouTubeProviderError("YouTube API quota exceeded or access forbidden")
+        if search_resp.status_code != 200:
+            raise YouTubeProviderError(f"Failed to search channels: {search_resp.text}")
+
+        channel_ids = [
+            item["snippet"]["channelId"] for item in search_resp.json().get("items", [])
+            if item.get("snippet", {}).get("channelId")
+        ]
+        if not channel_ids:
+            return []
+
+        # search.list's own snippet lacks subscriber/view/video counts --
+        # one batched channels.list call gets full, consistent ChannelData
+        # for every candidate instead of returning partial results.
+        details_params = {
+            "part": "snippet,statistics", "id": ",".join(channel_ids), **self._api_key_params(),
+        }
+        async with self._client() as client:
+            details_resp = await client.get(f"{DATA_API_BASE}/channels", params=details_params)
+        if details_resp.status_code != 200:
+            raise YouTubeProviderError(f"Failed to fetch channel details: {details_resp.text}")
+
+        by_id = {}
+        for item in details_resp.json().get("items", []):
+            snippet, stats = item["snippet"], item.get("statistics", {})
+            by_id[item["id"]] = ChannelData(
+                youtube_channel_id=item["id"],
+                title=snippet.get("title", ""),
+                description=snippet.get("description"),
+                thumbnail_url=(snippet.get("thumbnails", {}).get("high", {}) or {}).get("url"),
+                country=snippet.get("country"),
+                subscriber_count=_safe_int(stats.get("subscriberCount")),
+                view_count=_safe_int(stats.get("viewCount")),
+                video_count=_safe_int(stats.get("videoCount")),
+            )
+        # Preserve search relevance order; skip any id channels.list didn't
+        # return (e.g. a channel deleted between the two calls).
+        return [by_id[cid] for cid in channel_ids if cid in by_id]
 
     @_retryable
     async def list_channel_videos(

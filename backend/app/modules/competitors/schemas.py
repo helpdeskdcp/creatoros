@@ -19,8 +19,21 @@ class CompetitorOut(BaseModel):
 
 
 class AddCompetitorRequest(BaseModel):
-    youtube_channel_id: str
+    # A channel id, @handle, or full YouTube URL -- never requires the
+    # creator to know/paste a raw UCxxxxxxxx id. A bare name should go
+    # through GET /competitors/search instead.
+    identifier: str
     notes: str | None = None
+
+
+class ChannelSearchResultOut(BaseModel):
+    youtube_channel_id: str
+    title: str
+    description: str | None
+    thumbnail_url: str | None
+    subscriber_count: int | None
+    view_count: int | None
+    video_count: int | None
 
 
 class CompetitorVideoOut(BaseModel):
