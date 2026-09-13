@@ -75,6 +75,7 @@ def _register_routers(app: FastAPI, settings) -> None:
     from app.modules.topics.router import router as topics_router
     from app.modules.trends.router import router as trends_router
     from app.modules.users.router import router as users_router
+    from app.modules.video_updates.router import router as video_updates_router
     from app.modules.videos.router import router as videos_router
 
     prefix = settings.api_v1_prefix
@@ -82,6 +83,9 @@ def _register_routers(app: FastAPI, settings) -> None:
     app.include_router(users_router, prefix=f"{prefix}/users", tags=["users"])
     app.include_router(channels_router, prefix=f"{prefix}/channels", tags=["channels"])
     app.include_router(videos_router, prefix=f"{prefix}/videos", tags=["videos"])
+    app.include_router(
+        video_updates_router, prefix=f"{prefix}/video-updates", tags=["video-updates"]
+    )
     app.include_router(
         competitors_router, prefix=f"{prefix}/competitors", tags=["competitors"]
     )

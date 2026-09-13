@@ -55,6 +55,7 @@ from app.modules.titles.models import Title  # noqa: F401
 from app.modules.topics.models import Opportunity, Topic  # noqa: F401
 from app.modules.trends.models import Trend  # noqa: F401
 from app.modules.users.models import User, UserSession  # noqa: F401
+from app.modules.video_updates.models import VideoUpdateProposal  # noqa: F401
 from app.modules.videos.models import Video, VideoMetricSnapshot  # noqa: F401
 
 __all__ = ["Base"]

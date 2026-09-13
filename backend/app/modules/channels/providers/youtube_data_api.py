@@ -358,6 +358,59 @@ class YouTubeDataAPIProvider(YouTubeProvider):
             return False
         return items[0]["status"].get("uploadStatus") == "processed"
 
+    @_retryable
+    async def update_video_metadata(
+        self,
+        access_token: str,
+        youtube_video_id: str,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        tags: list[str] | None = None,
+    ) -> VideoData:
+        # videos.update replaces the ENTIRE snippet resource -- fetch the
+        # current one first so fields this call doesn't touch (categoryId,
+        # defaultLanguage, tags when only updating title, etc.) survive.
+        async with self._client() as client:
+            get_resp = await client.get(
+                f"{DATA_API_BASE}/videos",
+                params={"part": "snippet", "id": youtube_video_id, **self._api_key_params()},
+            )
+            if get_resp.status_code != 200:
+                raise YouTubeProviderError(f"Failed to read current snippet: {get_resp.text}")
+            items = get_resp.json().get("items", [])
+            if not items:
+                raise YouTubeProviderError(f"Video '{youtube_video_id}' not found")
+            snippet = items[0]["snippet"]
+
+            if title is not None:
+                snippet["title"] = title
+            if description is not None:
+                snippet["description"] = description
+            if tags is not None:
+                snippet["tags"] = tags
+
+            put_resp = await client.put(
+                f"{DATA_API_BASE}/videos",
+                params={"part": "snippet"},
+                headers={"Authorization": f"Bearer {access_token}"},
+                json={"id": youtube_video_id, "snippet": snippet},
+            )
+        if put_resp.status_code != 200:
+            raise YouTubeProviderError(f"Failed to update video metadata: {put_resp.text}")
+
+        updated_snippet = put_resp.json()["snippet"]
+        return VideoData(
+            youtube_video_id=youtube_video_id,
+            title=updated_snippet.get("title", ""),
+            description=updated_snippet.get("description"),
+            thumbnail_url=(updated_snippet.get("thumbnails", {}).get("high", {}) or {}).get("url"),
+            published_at=_parse_iso8601(updated_snippet.get("publishedAt")),
+            duration_seconds=None,
+            category_id=updated_snippet.get("categoryId"),
+            tags=updated_snippet.get("tags", []),
+        )
+
 
 def _safe_int(value) -> int | None:
     if value is None:

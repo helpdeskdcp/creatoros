@@ -20,6 +20,21 @@ from app.modules.channels.providers.base import (
 class MockYouTubeProvider(YouTubeProvider):
     def __init__(self) -> None:
         self._now = datetime.now(UTC)
+        # Lets update_video_metadata/get_video_details genuinely round-trip
+        # in tests (propose -> execute -> verify) instead of get_video_details
+        # always returning the same static value regardless of prior calls.
+        self._video_state: dict[str, dict] = {}
+
+    def _video_snippet(self, video_id: str) -> dict:
+        return self._video_state.setdefault(
+            video_id,
+            {
+                "title": f"Mock Video {video_id}",
+                "description": "Mock description",
+                "tags": ["mock"],
+                "category_id": "27",
+            },
+        )
 
     async def get_oauth_authorize_url(self, state: str) -> str:
         return f"https://mock.youtube.local/oauth/authorize?state={state}"
@@ -76,22 +91,52 @@ class MockYouTubeProvider(YouTubeProvider):
         return VideosPage(videos=videos, next_page_token=None)
 
     async def get_video_details(self, video_ids: list[str]) -> list[VideoData]:
-        return [
-            VideoData(
-                youtube_video_id=vid,
-                title=f"Mock Video {vid}",
-                description="Mock description",
-                thumbnail_url="https://mock.youtube.local/thumb.jpg",
-                published_at=self._now - timedelta(days=1),
-                duration_seconds=600,
-                category_id="27",
-                tags=["mock"],
-                view_count=1000,
-                like_count=50,
-                comment_count=5,
+        results = []
+        for vid in video_ids:
+            snippet = self._video_snippet(vid)
+            results.append(
+                VideoData(
+                    youtube_video_id=vid,
+                    title=snippet["title"],
+                    description=snippet["description"],
+                    thumbnail_url="https://mock.youtube.local/thumb.jpg",
+                    published_at=self._now - timedelta(days=1),
+                    duration_seconds=600,
+                    category_id=snippet["category_id"],
+                    tags=snippet["tags"],
+                    view_count=1000,
+                    like_count=50,
+                    comment_count=5,
+                )
             )
-            for vid in video_ids
-        ]
+        return results
+
+    async def update_video_metadata(
+        self,
+        access_token: str,
+        youtube_video_id: str,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        tags: list[str] | None = None,
+    ) -> VideoData:
+        snippet = self._video_snippet(youtube_video_id)
+        if title is not None:
+            snippet["title"] = title
+        if description is not None:
+            snippet["description"] = description
+        if tags is not None:
+            snippet["tags"] = tags
+        return VideoData(
+            youtube_video_id=youtube_video_id,
+            title=snippet["title"],
+            description=snippet["description"],
+            thumbnail_url="https://mock.youtube.local/thumb.jpg",
+            published_at=self._now - timedelta(days=1),
+            duration_seconds=600,
+            category_id=snippet["category_id"],
+            tags=snippet["tags"],
+        )
 
     async def get_channel_analytics(
         self, channel_id: str, access_token: str, start_date: datetime, end_date: datetime

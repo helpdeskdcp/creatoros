@@ -153,3 +153,24 @@ class YouTubeProvider(ABC):
     async def verify_publication(self, youtube_video_id: str) -> bool:
         """Confirms the video is actually live/visible via a public read,
         independent of what the upload call claimed."""
+
+    # --- Existing-video metadata updates (Verified Update Engine) ---
+
+    @abstractmethod
+    async def update_video_metadata(
+        self,
+        access_token: str,
+        youtube_video_id: str,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        tags: list[str] | None = None,
+    ) -> VideoData:
+        """Updates ONLY the fields passed (None = leave unchanged). The
+        underlying YouTube API PUTs the whole `snippet` resource, so
+        implementations must read the current snippet first and merge --
+        never silently blank out categoryId/tags/etc. that weren't part of
+        this call. Returns the video's state as YouTube reports it
+        immediately after the update (the caller is responsible for an
+        independent re-fetch if it needs a verification read genuinely
+        decoupled from this call's own response)."""
