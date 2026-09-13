@@ -10,6 +10,7 @@ from app.modules.analytics.schemas import (
     GrowthActionOut,
     GrowthDiagnosisOut,
     GrowthScorecardOut,
+    PublishTimingSuggestionOut,
     SnapshotOut,
     SubscriberGrowthOut,
 )
@@ -68,3 +69,16 @@ async def todays_growth_actions(
     (app/jobs/tasks.py:run_daily_growth_agent), scoped to the current
     user across all their channels."""
     return await service.list_todays_growth_actions(db, user.id)
+
+
+@router.get("/channel/{channel_id}/publish-timing", response_model=PublishTimingSuggestionOut)
+async def publish_timing_suggestion(
+    channel_id: uuid.UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+):
+    channel = await get_owned_or_404(db, Channel, channel_id, user.id)
+    result = await service.analyze_publish_timing(db, channel)
+    return PublishTimingSuggestionOut(
+        quality=result.quality, best_day_of_week=result.best_day_of_week,
+        best_day_median_views=result.best_day_median_views, sample_size=result.sample_size,
+        evidence=result.evidence,
+    )

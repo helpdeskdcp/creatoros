@@ -420,3 +420,66 @@ async def detect_performance_anomalies(db: AsyncSession, channel: Channel) -> li
             anomalies.append(PerformanceAnomaly(video, "DECLINE", baseline_velocity, recent_velocity, ratio))
 
     return anomalies
+
+
+class PublishTimingSuggestion:
+    def __init__(
+        self, quality: DataQuality, best_day_of_week: str | None, best_day_median_views: float | None,
+        sample_size: int, evidence: str,
+    ) -> None:
+        self.quality = quality
+        self.best_day_of_week = best_day_of_week
+        self.best_day_median_views = best_day_median_views
+        self.sample_size = sample_size
+        self.evidence = evidence
+
+
+_DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+_MIN_VIDEOS_FOR_TIMING = 6
+_MIN_DAYS_REPRESENTED = 2
+_MIN_VIDEOS_PER_DAY = 2
+
+
+async def analyze_publish_timing(db: AsyncSession, channel: Channel) -> PublishTimingSuggestion:
+    """Groups this channel's own historical videos by day-of-week and
+    compares median CURRENT view counts -- an honest cross-sectional
+    comparison, not a time-normalized forecast (view counts accumulate
+    for different lengths of time depending on how old each video is,
+    so this is a real limitation, not hidden: see evidence text). Never
+    recommends a day with fewer than 2 real videos behind it."""
+    videos = list(
+        await db.scalars(
+            select(Video).where(Video.channel_id == channel.id, Video.published_at.is_not(None))
+        )
+    )
+    if len(videos) < _MIN_VIDEOS_FOR_TIMING:
+        return PublishTimingSuggestion(
+            DataQuality.INSUFFICIENT_DATA, None, None, len(videos),
+            f"Only {len(videos)} published videos with a known publish date -- "
+            f"at least {_MIN_VIDEOS_FOR_TIMING} are needed for an honest comparison.",
+        )
+
+    by_day: dict[str, list[int]] = {}
+    for video in videos:
+        if video.view_count is None:
+            continue
+        day_name = _DAY_NAMES[video.published_at.weekday()]
+        by_day.setdefault(day_name, []).append(video.view_count)
+
+    qualifying_days = {day: views for day, views in by_day.items() if len(views) >= _MIN_VIDEOS_PER_DAY}
+    if len(qualifying_days) < _MIN_DAYS_REPRESENTED:
+        return PublishTimingSuggestion(
+            DataQuality.INSUFFICIENT_DATA, None, None, len(videos),
+            f"Videos are spread across too few distinct publish days with {_MIN_VIDEOS_PER_DAY}+ "
+            "uploads each to compare -- upload on more different days of the week to unlock this.",
+        )
+
+    medians = {day: statistics.median(views) for day, views in qualifying_days.items()}
+    best_day = max(medians, key=medians.get)
+    return PublishTimingSuggestion(
+        DataQuality.REAL, best_day, medians[best_day], len(videos),
+        f"Videos published on {best_day} have a median of {medians[best_day]:.0f} views "
+        f"across {len(qualifying_days[best_day])} uploads -- the highest of the "
+        f"{len(qualifying_days)} days with enough history to compare. This compares current "
+        "view counts across videos of different ages, not time-normalized velocity.",
+    )

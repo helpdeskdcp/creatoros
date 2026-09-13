@@ -3,7 +3,7 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
-from app.core.data_quality import Metric
+from app.core.data_quality import DataQuality, Metric
 
 
 class SnapshotOut(BaseModel):
@@ -79,3 +79,11 @@ class GrowthActionOut(BaseModel):
     execution_status: str
 
     model_config = {"from_attributes": True}
+
+
+class PublishTimingSuggestionOut(BaseModel):
+    quality: DataQuality
+    best_day_of_week: str | None
+    best_day_median_views: float | None
+    sample_size: int
+    evidence: str
