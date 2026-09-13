@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     # No current CreatorOS call site is a coding task -- content-engine
     # features (titles/hooks/SEO/scripts/thumbnails) are copywriting, not
     # code generation -- so this is unused today but benchmarked and ready.
-    ollama_coding_model: str = "qwen2.5-coder:1.5b"
+    ollama_coding_model: str = "qwen2.5-coder:3b"
     # DEEP tier: only the qwen3 family on this VPS supports think=true at
     # all (gemma2/qwen2.5-coder return a hard 400 "does not support
     # thinking" -- verified in scripts/ollama_benchmark_results.json).

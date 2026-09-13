@@ -121,8 +121,13 @@ services:
     healthcheck:
       # celery beat has no RPC health endpoint the way workers do (inspect
       # ping only reaches worker processes) -- a simple liveness check on
-      # the scheduler process itself is the standard approach.
-      test: ["CMD-SHELL", "pgrep -f 'celery.*beat' || exit 1"]
+      # the scheduler process itself is the standard approach. pgrep isn't
+      # installed in the python:3.11-slim image (confirmed: healthcheck was
+      # silently failing 100% of the time with "pgrep: not found", marking
+      # a genuinely-running beat container permanently unhealthy) -- scan
+      # /proc directly instead, which needs nothing beyond the Python
+      # already in the image.
+      test: ["CMD-SHELL", "python3 -c \"import os,sys; sys.exit(0 if any(b'beat' in open(f'/proc/{p}/cmdline','rb').read() for p in os.listdir('/proc') if p.isdigit()) else 1)\""]
       interval: 30s
       timeout: 10s
       retries: 5
