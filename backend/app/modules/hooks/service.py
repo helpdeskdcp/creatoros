@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.cache import cached_generate
 from app.ai.orchestrator import AIOrchestrator
+from app.modules.experiments.learning import get_learning_context_text
 from app.modules.hooks.models import Hook
 from app.modules.hooks.schemas import GeneratedHooksResponse
 
@@ -26,12 +27,14 @@ async def generate_hooks(
     audience: str | None,
     count: int,
 ) -> list[Hook]:
+    learning_context = await get_learning_context_text(db, owner_user_id, signal_type="hook_keyword")
     user_prompt = (
         f"Topic: {topic}\n"
         f"Target audience: {audience or 'general YouTube audience'}\n"
         f"Generate exactly {count} hooks."
+        + (f"\n\n{learning_context}\nFavor patterns with a real winning track record where relevant." if learning_context else "")
     )
-    result = await cached_generate(db, orchestrator, 
+    result = await cached_generate(db, orchestrator,
         task="generate_hooks",
         system_prompt=SYSTEM_PROMPT,
         user_prompt=user_prompt,

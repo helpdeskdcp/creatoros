@@ -16,7 +16,11 @@ from app.modules.channels.models import Channel  # noqa: F401
 from app.modules.competitors.models import Competitor, CompetitorVideo  # noqa: F401
 from app.modules.content.models import ContentEvent, ContentItem  # noqa: F401
 from app.modules.distribution.models import DistributionAsset, DistributionCampaign  # noqa: F401
-from app.modules.experiments.models import Experiment, ExperimentVariant  # noqa: F401
+from app.modules.experiments.models import (  # noqa: F401
+    CreatorLearningSignal,
+    Experiment,
+    ExperimentVariant,
+)
 from app.modules.hooks.models import Hook  # noqa: F401
 from app.modules.media.models import MediaAsset  # noqa: F401
 from app.modules.notifications.models import Notification  # noqa: F401

@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.cache import cached_generate
 from app.ai.orchestrator import AIOrchestrator
+from app.modules.experiments.learning import get_learning_context_text
 from app.modules.titles.models import Title
 from app.modules.titles.schemas import GeneratedTitlesResponse
 
@@ -26,10 +27,15 @@ async def generate_titles(
     video_id: uuid.UUID | None,
     count: int,
 ) -> list[Title]:
-    result = await cached_generate(db, orchestrator, 
+    learning_context = await get_learning_context_text(db, owner_user_id, signal_type="title_keyword")
+    user_prompt = f"Topic: {topic}\nGenerate exactly {count} title candidates."
+    if learning_context:
+        user_prompt += f"\n\n{learning_context}\nFavor patterns with a real winning track record where relevant."
+
+    result = await cached_generate(db, orchestrator,
         task="generate_titles",
         system_prompt=SYSTEM_PROMPT,
-        user_prompt=f"Topic: {topic}\nGenerate exactly {count} title candidates.",
+        user_prompt=user_prompt,
         schema=GeneratedTitlesResponse,
         user_id=owner_user_id,
     )

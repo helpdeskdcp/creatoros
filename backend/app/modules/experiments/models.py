@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -67,7 +67,40 @@ class ExperimentVariant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     sample_size: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     metric_value: Mapped[float | None] = mapped_column(nullable=True)
+    # The real published video this variant's performance is measured
+    # from. When set, measure_variant() pulls the real metric straight
+    # from VideoMetricSnapshot/Video instead of requiring a human to
+    # manually type in a number they read somewhere else.
+    video_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("videos.id", ondelete="SET NULL"), nullable=True
+    )
+    measured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     experiment: Mapped["Experiment"] = relationship(
         back_populates="variants", foreign_keys=[experiment_id]
     )
+
+
+class CreatorLearningSignal(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """The creator-specific learning loop's persistent state: real
+    win/loss counts per signal, built ONLY from concluded experiments
+    (real historical performance, per _maybe_conclude) -- never from an
+    LLM's self-reported guess. One row per (owner, signal_type,
+    signal_key); wins/losses accumulate across every experiment that
+    ever touched this signal, so the profile gets more confident over
+    time instead of resetting per experiment.
+    """
+
+    __tablename__ = "creator_learning_signals"
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", "signal_type", "signal_key", name="uq_learning_signal"),
+    )
+
+    owner_user_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # topic_keyword | title_keyword | hook_keyword | format | publish_window
+    signal_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    signal_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    wins: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    losses: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

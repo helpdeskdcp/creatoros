@@ -12,6 +12,8 @@ interface Variant {
   content: string;
   sample_size: number;
   metric_value: number | null;
+  video_id: string | null;
+  measured_at: string | null;
 }
 interface Experiment {
   id: string;
@@ -51,6 +53,12 @@ export default function ExperimentsPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["experiments"] }),
   });
 
+  const measureMutation = useMutation({
+    mutationFn: (variantId: string) =>
+      api.post<{ variant: Variant; status: string }>(`/experiments/variants/${variantId}/measure`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["experiments"] }),
+  });
+
   return (
     <AppShell>
       <PageHeader title="Growth Experiments" description="A winner is never declared before every variant hits its minimum sample size." />
@@ -87,8 +95,25 @@ export default function ExperimentsPage() {
             )}
             <div className="mt-2 space-y-1 text-sm">
               {exp.variants.map((v) => (
-                <div key={v.id}>
-                  {v.label}: {v.metric_value ?? "—"} (n={v.sample_size})
+                <div key={v.id} className="flex items-center gap-2">
+                  <span>
+                    {v.label}: {v.metric_value ?? "—"} (n={v.sample_size})
+                    {v.measured_at && <span className="muted"> · measured from real analytics</span>}
+                  </span>
+                  {exp.status === "RUNNING" && v.video_id && (
+                    <Button
+                      variant="secondary"
+                      onClick={() => measureMutation.mutate(v.id)}
+                      disabled={measureMutation.isPending}
+                    >
+                      Measure from real data
+                    </Button>
+                  )}
+                  {exp.status === "RUNNING" && !v.video_id && (
+                    <span className="text-xs muted">
+                      Link a video via API (POST /experiments/variants/{"{id}"}/link-video) to measure automatically
+                    </span>
+                  )}
                 </div>
               ))}
             </div>

@@ -23,6 +23,8 @@ class VariantOut(BaseModel):
     content: str
     sample_size: int
     metric_value: float | None
+    video_id: uuid.UUID | None
+    measured_at: datetime | None
 
 
 class ExperimentOut(BaseModel):
@@ -43,3 +45,12 @@ class ExperimentOut(BaseModel):
 class RecordVariantResultRequest(BaseModel):
     sample_size: int
     metric_value: float
+
+
+class LinkVariantVideoRequest(BaseModel):
+    video_id: uuid.UUID
+
+
+class MeasureVariantResultOut(BaseModel):
+    variant: VariantOut
+    status: str  # "measured" | "insufficient_data"
