@@ -58,6 +58,7 @@ const NAV_SECTIONS: { label: string; items: { href: string; label: string }[] }[
     items: [
       { href: "/settings", label: "Control Center" },
       { href: "/audit", label: "Audit Log" },
+      { href: "/billing", label: "Billing" },
     ],
   },
 ];

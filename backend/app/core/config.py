@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o-mini"
 
+    # --- Billing ---
+    billing_provider: str = "none"  # "none" (default -- CONFIGURATION_REQUIRED) or "stripe"
+
     # --- Video processing / transcription ---
     transcription_provider: str = "local"  # "local" (faster-whisper) or "openai"
     whisper_model_size: str = "tiny"  # tiny/base/small/medium/large-v3 -- tiny is CPU-appropriate

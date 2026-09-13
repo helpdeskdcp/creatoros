@@ -53,6 +53,7 @@ def _register_routers(app: FastAPI, settings) -> None:
     from app.modules.analytics.router import router as analytics_router
     from app.modules.audit.router import router as audit_router
     from app.modules.auth.router import router as auth_router
+    from app.modules.billing.router import router as billing_router
     from app.modules.channels.router import router as channels_router
     from app.modules.competitors.router import router as competitors_router
     from app.modules.content.router import router as content_router
@@ -108,6 +109,7 @@ def _register_routers(app: FastAPI, settings) -> None:
     app.include_router(publishing_router, prefix=f"{prefix}/publishing", tags=["publishing"])
     app.include_router(distribution_router, prefix=f"{prefix}/distribution", tags=["distribution"])
     app.include_router(settings_router, prefix=f"{prefix}/settings", tags=["settings"])
+    app.include_router(billing_router, prefix=f"{prefix}/billing", tags=["billing"])
 
 
 def _register_observability(app: FastAPI) -> None:

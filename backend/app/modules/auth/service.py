@@ -15,6 +15,7 @@ from app.core.security import (
     verify_password,
 )
 from app.core.timeutils import ensure_aware
+from app.modules.billing.service import ensure_personal_organization
 from app.modules.users.models import User, UserRole, UserSession
 
 
@@ -37,6 +38,7 @@ async def register_user(
     db.add(user)
     await db.commit()
     await db.refresh(user)
+    await ensure_personal_organization(db, user.id)
     return user
 
 

@@ -12,6 +12,12 @@ from app.modules.analytics.models import (  # noqa: F401
     SubscriberGrowthMetric,
 )
 from app.modules.audit.models import AuditLog  # noqa: F401
+from app.modules.billing.models import (  # noqa: F401
+    Invoice,
+    Organization,
+    OrganizationMember,
+    Subscription,
+)
 from app.modules.channels.models import Channel  # noqa: F401
 from app.modules.competitors.models import (  # noqa: F401
     Competitor,

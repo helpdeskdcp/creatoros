@@ -5,7 +5,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import jwt
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import decrypt, encrypt
@@ -13,6 +13,7 @@ from app.core.errors import ConflictError, NotFoundError, UnauthorizedError
 from app.core.logging import get_logger
 from app.core.security import create_jwt, decode_jwt
 from app.core.timeutils import ensure_aware
+from app.modules.billing.entitlement import enforce_limit
 from app.modules.channels.models import Channel, SyncStatus
 from app.modules.channels.providers import get_youtube_provider
 from app.modules.channels.providers.base import YouTubeProviderError
@@ -84,6 +85,10 @@ async def connect_channel_via_oauth(db: AsyncSession, user_id: uuid.UUID, code: 
             )
         channel = existing
     else:
+        current_count = await db.scalar(
+            select(func.count()).select_from(Channel).where(Channel.owner_user_id == user_id)
+        )
+        await enforce_limit(db, user_id=user_id, feature="max_channels", current_count=current_count)
         channel = Channel(owner_user_id=user_id, youtube_channel_id=channel_data.youtube_channel_id)
         db.add(channel)
 
@@ -119,6 +124,11 @@ async def connect_channel_public(
     )
     if existing:
         raise ConflictError("This channel is already connected")
+
+    current_count = await db.scalar(
+        select(func.count()).select_from(Channel).where(Channel.owner_user_id == user_id)
+    )
+    await enforce_limit(db, user_id=user_id, feature="max_channels", current_count=current_count)
 
     provider = get_youtube_provider()
     channel_data = await provider.get_channel(channel_id=youtube_channel_id)
