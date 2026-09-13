@@ -36,6 +36,12 @@ SCOPES = [
     "https://www.googleapis.com/auth/youtube.readonly",
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/yt-analytics.readonly",
+    # Real production finding: videos.update (the Verified Update Engine's
+    # only write path) returned a genuine 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT
+    # with only the scopes above -- youtube.upload covers the upload flow
+    # itself but not general metadata updates on already-published videos.
+    # force-ssl is YouTube's own documented minimal scope for videos.update.
+    "https://www.googleapis.com/auth/youtube.force-ssl",
 ]
 
 _retryable = retry(
