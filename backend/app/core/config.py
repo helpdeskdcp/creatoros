@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o-mini"
 
+    # --- Video processing / transcription ---
+    transcription_provider: str = "local"  # "local" (faster-whisper) or "openai"
+    whisper_model_size: str = "tiny"  # tiny/base/small/medium/large-v3 -- tiny is CPU-appropriate
+    ffmpeg_temp_dir: str = "storage/_tmp_video_processing"
+
     # --- Object storage ---
     # "local" (default, always works) or "s3" (requires the vars below --
     # falls back to CONFIGURATION_REQUIRED rather than silently using local

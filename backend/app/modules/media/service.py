@@ -80,6 +80,44 @@ async def save_upload(
     return asset
 
 
+async def save_local_file(
+    db: AsyncSession,
+    owner_user_id: uuid.UUID,
+    purpose: MediaPurpose,
+    local_path: str,
+    *,
+    original_filename: str,
+    content_type: str,
+) -> MediaAsset:
+    """For a file CreatorOS itself already produced and validated on disk
+    (a rendered Short, for example) -- unlike save_upload(), there is no
+    untrusted client stream to bound/validate here, since the caller
+    (shorts.service.render_candidate) is the one that generated the file
+    via ffmpeg in the first place. Still goes through the same
+    StorageBackend so a rendered clip lives wherever uploads do (and, if
+    S3 is configured, benefits from the same persistence)."""
+    settings = get_settings()
+    storage = get_storage_backend(settings)
+    ext = os.path.splitext(local_path)[1].lower()
+    key = generate_key(owner_user_id, purpose.value.lower(), ext)
+    stored = await storage.save(key, local_path)  # moves local_path -> final location
+
+    asset = MediaAsset(
+        owner_user_id=owner_user_id,
+        purpose=purpose,
+        storage_backend=stored.backend,
+        storage_key=stored.key,
+        original_filename=original_filename,
+        content_type=content_type,
+        size_bytes=stored.size_bytes,
+        created_at=datetime.now(UTC),
+    )
+    db.add(asset)
+    await db.commit()
+    await db.refresh(asset)
+    return asset
+
+
 def local_path_for(asset: MediaAsset) -> str | None:
     """Best-effort local filesystem path for an asset -- publishing.
     execute_run() needs a real path to hand to the YouTubeProvider. Only

@@ -4,6 +4,8 @@ own retry/backoff handle transient failures — nothing here silently
 swallows an exception."""
 import asyncio
 import json
+import os
+import time
 import uuid
 from datetime import UTC, datetime
 
@@ -11,6 +13,7 @@ from celery import shared_task
 from celery.utils.log import get_task_logger
 from sqlalchemy import select
 
+from app.core.config import get_settings
 from app.jobs.db import WorkerSessionLocal
 from app.jobs.models import Job, JobStatus
 
@@ -203,21 +206,9 @@ def report_generation(owner_user_id: str):
     _run(_do())
 
 
-@shared_task
-def temporary_media_cleanup_job():
-    """Growth OS: CreatorOS must not become a permanent video storage server.
-    Deletes any file under storage/tmp_uploads older than its TTL. Never
-    touches storage/ paths outside tmp_uploads — permanent creator data
-    (thumbnails, briefs) lives elsewhere and this job never sees it."""
-    import os
-    import time
-
-    tmp_dir = os.path.join("storage", "tmp_uploads")
+def _sweep_flat_dir(tmp_dir: str, ttl_seconds: float, now: float) -> int:
     if not os.path.isdir(tmp_dir):
-        return {"deleted": 0}
-
-    ttl_seconds = 24 * 3600
-    now = time.time()
+        return 0
     deleted = 0
     for name in os.listdir(tmp_dir):
         path = os.path.join(tmp_dir, name)
@@ -227,6 +218,53 @@ def temporary_media_cleanup_job():
                 deleted += 1
         except OSError as exc:
             logger.warning("temporary_media_cleanup_job could not remove %s: %s", path, exc)
+    return deleted
+
+
+def _sweep_video_processing_dir(base_dir: str, ttl_seconds: float, now: float) -> int:
+    """Per-job subdirectories under storage/_tmp_video_processing/<job_id>/
+    hold intermediate audio/render output. Normal operation self-cleans
+    these (see shorts.service's try/finally blocks); this sweep exists
+    for the case a worker was hard-killed mid-stage (SIGKILL/OOM), which
+    a try/finally cannot catch, and leaves the directory itself behind
+    even when a normal run's files are removed one by one."""
+    if not os.path.isdir(base_dir):
+        return 0
+    deleted = 0
+    for job_dir_name in os.listdir(base_dir):
+        job_dir = os.path.join(base_dir, job_dir_name)
+        if not os.path.isdir(job_dir):
+            continue
+        try:
+            newest_mtime = max(
+                (os.path.getmtime(os.path.join(job_dir, f)) for f in os.listdir(job_dir)),
+                default=os.path.getmtime(job_dir),
+            )
+            if (now - newest_mtime) > ttl_seconds:
+                for f in os.listdir(job_dir):
+                    os.remove(os.path.join(job_dir, f))
+                    deleted += 1
+                os.rmdir(job_dir)
+        except OSError as exc:
+            logger.warning("temporary_media_cleanup_job could not remove %s: %s", job_dir, exc)
+    return deleted
+
+
+@shared_task
+def temporary_media_cleanup_job():
+    """Growth OS: CreatorOS must not become a permanent video storage server.
+    Deletes any file under storage/tmp_uploads (or a stale
+    storage/_tmp_video_processing/<job_id>/ directory left behind by a
+    hard-killed worker) older than its TTL. Never touches storage/ paths
+    outside these two temp locations — permanent creator data
+    (thumbnails, briefs, uploaded/rendered media) lives elsewhere and
+    this job never sees it."""
+    ttl_seconds = 24 * 3600
+    now = time.time()
+    deleted = _sweep_flat_dir(os.path.join("storage", "tmp_uploads"), ttl_seconds, now)
+    deleted += _sweep_video_processing_dir(
+        get_settings().ffmpeg_temp_dir, ttl_seconds, now
+    )
     return {"deleted": deleted}
 
 
@@ -329,6 +367,53 @@ def poll_pending_publishing_runs_task():
             return await poll_pending_publishing_runs(db)
 
     return _run(_do())
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+def process_video_job_task(self, job_id: str):
+    """Runs every automatic content-factory stage (validate, extract
+    audio, transcribe, detect moments, generate metadata) off the
+    request path -- see shorts.service.process_job's own docstring for
+    the resumability contract that makes retrying this safe."""
+    async def _do():
+        async with WorkerSessionLocal() as db:
+            from app.modules.shorts.models import VideoProcessingJob
+            from app.modules.shorts.service import process_job
+
+            job = await db.get(VideoProcessingJob, uuid.UUID(job_id))
+            if not job:
+                return {"error": "job not found"}
+            job = await process_job(db, job)
+            return {"job_id": str(job.id), "status": job.status.value}
+
+    try:
+        return _run(_do())
+    except Exception as exc:  # noqa: BLE001
+        logger.error("process_video_job_task failed for %s: %s", job_id, exc)
+        raise self.retry(exc=exc) from exc
+
+
+@shared_task(bind=True, max_retries=2, default_retry_delay=60)
+def render_short_candidate_task(self, candidate_id: str):
+    """Rendering (real ffmpeg encode + upload into storage) only ever
+    runs for a candidate a creator has explicitly approved -- see
+    shorts.service.render_candidate's guard."""
+    async def _do():
+        async with WorkerSessionLocal() as db:
+            from app.modules.shorts.models import ShortCandidate
+            from app.modules.shorts.service import render_candidate
+
+            candidate = await db.get(ShortCandidate, uuid.UUID(candidate_id))
+            if not candidate:
+                return {"error": "candidate not found"}
+            candidate = await render_candidate(db, candidate)
+            return {"candidate_id": str(candidate.id), "status": candidate.status.value}
+
+    try:
+        return _run(_do())
+    except Exception as exc:  # noqa: BLE001
+        logger.error("render_short_candidate_task failed for %s: %s", candidate_id, exc)
+        raise self.retry(exc=exc) from exc
 
 
 @shared_task

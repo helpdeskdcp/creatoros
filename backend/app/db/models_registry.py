@@ -30,6 +30,12 @@ from app.modules.research.models import ResearchProject, ResearchSource  # noqa:
 from app.modules.retention.models import RetentionMetric  # noqa: F401
 from app.modules.scripts.models import Script, ScriptVersion  # noqa: F401
 from app.modules.seo.models import SeoRecord  # noqa: F401
+from app.modules.shorts.models import (  # noqa: F401
+    ShortCandidate,
+    Transcript,
+    TranscriptSegment,
+    VideoProcessingJob,
+)
 from app.modules.thumbnails.models import ThumbnailBrief  # noqa: F401
 from app.modules.titles.models import Title  # noqa: F401
 from app.modules.topics.models import Opportunity, Topic  # noqa: F401
