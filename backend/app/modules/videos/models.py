@@ -63,6 +63,14 @@ class VideoMetricSnapshot(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     average_view_percentage: Mapped[float | None] = mapped_column(nullable=True)
     estimated_ctr: Mapped[float | None] = mapped_column(nullable=True)
     subscribers_gained: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Views during the Analytics-report window this subscribers_gained figure
+    # covers -- deliberately NOT the same as view_count above, which is the
+    # Data API's cumulative-lifetime total used by videos/service.py's 7-day
+    # velocity calculation. Conflating the two would silently corrupt that
+    # calculation (a small daily figure diffed against a large cumulative
+    # one). subscriber_conversion_rate divides by this field, never by
+    # view_count.
+    window_view_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     traffic_source_breakdown_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     source: Mapped[str] = mapped_column(String(32), default="youtube_data_api", nullable=False)

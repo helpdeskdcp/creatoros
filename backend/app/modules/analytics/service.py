@@ -106,13 +106,7 @@ async def compute_growth_scorecard(db: AsyncSession, channel: Channel) -> Growth
     ctr_score = await _ctr_score(db, channel.id)
     retention_score = await _retention_score(db, channel.id)
 
-    subscriber_conversion_score = (
-        insufficient_data(
-            0,
-            "Subscriber-conversion requires an authorized YouTube Analytics sync "
-            "(subscribersGained) which has not run for this channel yet",
-        )
-    )
+    subscriber_conversion_score = await _subscriber_conversion_score(db, channel)
     returning_viewers_score = insufficient_data(
         0,
         "Returning-viewer data requires the YouTube Analytics 'viewerType' report, "
@@ -209,6 +203,19 @@ async def _retention_score(db: AsyncSession, channel_id: uuid.UUID) -> Metric:
         return insufficient_data(0, "No early-dropoff data recorded")
     avg_dropoff = statistics.mean(dropoffs)
     return real_metric(round(max(0.0, 100 - avg_dropoff), 1), len(dropoffs))
+
+
+async def _subscriber_conversion_score(db: AsyncSession, channel: Channel) -> Metric:
+    """Was previously hardcoded to INSUFFICIENT_DATA unconditionally --
+    nothing ever called compute_subscriber_growth() from the scorecard.
+    Scaling matches this module's existing convention (content_score,
+    discovery_score): a heuristic cap, not a claim of statistical
+    precision. 5% conversion (unusually strong) maps to 100."""
+    growth = await compute_subscriber_growth(db, channel)
+    rate = growth.subscriber_conversion_rate
+    if rate.quality == DataQuality.INSUFFICIENT_DATA or rate.value is None:
+        return insufficient_data(rate.sample_size, rate.reason or "")
+    return real_metric(round(min(rate.value * 20, 100), 1), rate.sample_size)
 
 
 async def diagnose_growth(db: AsyncSession, channel: Channel) -> GrowthDiagnosisOut:
@@ -319,7 +326,11 @@ async def compute_subscriber_growth(db: AsyncSession, channel: Channel) -> Subsc
         )
 
     total_subs_gained = sum(r.subscribers_gained or 0 for r in rows)
-    total_views = sum(r.view_count or 0 for r in rows)
+    # window_view_count (Analytics-report views for the same period this
+    # subscribers_gained figure covers) -- NOT view_count, which is the
+    # Data API's cumulative-lifetime total used by the separate 7-day
+    # velocity calculation and would give a meaningless ratio here.
+    total_views = sum(r.window_view_count or 0 for r in rows)
     per_1000 = round((total_subs_gained / total_views) * 1000, 2) if total_views else 0.0
 
     return SubscriberGrowthOut(

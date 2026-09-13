@@ -96,7 +96,22 @@ class MockYouTubeProvider(YouTubeProvider):
     async def get_channel_analytics(
         self, channel_id: str, access_token: str, start_date: datetime, end_date: datetime
     ) -> list[AnalyticsRow]:
-        return []
+        """Deterministic sample data so OAuth-connected mock channels exercise
+        the same subscriber-growth pipeline real channels do -- an empty
+        list here would make it impossible to test/dev that pipeline at all
+        without live Google credentials."""
+        return [
+            AnalyticsRow(
+                video_youtube_id=f"mockvid{i:03d}",
+                date=start_date + timedelta(days=1),
+                views=200 * i,
+                average_view_duration_seconds=45.0 + i,
+                average_view_percentage=40.0 + i,
+                estimated_ctr=None,
+                subscribers_gained=2 * i,
+            )
+            for i in range(1, 11)
+        ]
 
     async def prepare_upload(
         self, access_token: str, metadata: UploadMetadata, file_size_bytes: int

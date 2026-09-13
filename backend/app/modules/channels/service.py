@@ -163,6 +163,62 @@ async def _get_valid_access_token(db: AsyncSession, channel: Channel) -> str | N
     return tokens.access_token
 
 
+async def _sync_channel_analytics(
+    db: AsyncSession,
+    provider,
+    channel: Channel,
+    access_token: str,
+    now: datetime,
+    snapshot_by_youtube_id: dict[str, VideoMetricSnapshot],
+) -> None:
+    """Populates the subscriber-growth data pipeline: without this, every
+    subscriber-conversion metric in the app was permanently INSUFFICIENT_DATA
+    because nothing ever called the YouTube Analytics API. Only reachable
+    when this channel has completed OAuth (access_token is truthy) -- the
+    yt-analytics.readonly scope is not available to public/unauthenticated
+    channels, and CreatorOS never guesses this data.
+
+    A channel that granted OAuth but declined the analytics scope
+    specifically gets a 403 here (see YouTubeDataAPIProvider.
+    get_channel_analytics) -- caught and skipped, not fatal to the sync,
+    since the video/channel data fetched above is still real and worth
+    keeping.
+    """
+    try:
+        rows = await provider.get_channel_analytics(
+            channel_id=channel.youtube_channel_id,
+            access_token=access_token,
+            start_date=now - timedelta(days=30),
+            end_date=now,
+        )
+    except YouTubeProviderError as exc:
+        logger.warning(
+            "channel_analytics_sync_skipped", channel_id=str(channel.id), error=str(exc)
+        )
+        return
+
+    by_video: dict[str, list] = {}
+    for row in rows:
+        by_video.setdefault(row.video_youtube_id, []).append(row)
+
+    for youtube_video_id, video_rows in by_video.items():
+        snapshot = snapshot_by_youtube_id.get(youtube_video_id)
+        if not snapshot:
+            continue  # video wasn't in this sync's page window -- skip rather than guess
+
+        views = [r.views for r in video_rows if r.views is not None]
+        durations = [r.average_view_duration_seconds for r in video_rows if r.average_view_duration_seconds is not None]
+        percentages = [r.average_view_percentage for r in video_rows if r.average_view_percentage is not None]
+        ctrs = [r.estimated_ctr for r in video_rows if r.estimated_ctr is not None]
+        subs = [r.subscribers_gained for r in video_rows if r.subscribers_gained is not None]
+
+        snapshot.window_view_count = sum(views) if views else None
+        snapshot.average_view_duration_seconds = sum(durations) / len(durations) if durations else None
+        snapshot.average_view_percentage = sum(percentages) / len(percentages) if percentages else None
+        snapshot.estimated_ctr = sum(ctrs) / len(ctrs) if ctrs else None
+        snapshot.subscribers_gained = sum(subs) if subs else None
+
+
 async def sync_channel(db: AsyncSession, channel_id: uuid.UUID) -> Channel:
     """Full incremental sync: refresh channel stats, upsert every video and
     record a metrics snapshot. Idempotent — safe to run repeatedly."""
@@ -186,6 +242,7 @@ async def sync_channel(db: AsyncSession, channel_id: uuid.UUID) -> Channel:
         page_token: str | None = None
         now = datetime.now(UTC)
         seen_pages = 0
+        snapshot_by_youtube_id: dict[str, VideoMetricSnapshot] = {}
         while True:
             page = await provider.list_channel_videos(channel.youtube_channel_id, page_token)
             for vdata in page.videos:
@@ -209,20 +266,23 @@ async def sync_channel(db: AsyncSession, channel_id: uuid.UUID) -> Channel:
                 video.comment_count = vdata.comment_count
                 await db.flush()
 
-                db.add(
-                    VideoMetricSnapshot(
-                        video_id=video.id,
-                        captured_at=now,
-                        view_count=vdata.view_count,
-                        like_count=vdata.like_count,
-                        comment_count=vdata.comment_count,
-                    )
+                snapshot = VideoMetricSnapshot(
+                    video_id=video.id,
+                    captured_at=now,
+                    view_count=vdata.view_count,
+                    like_count=vdata.like_count,
+                    comment_count=vdata.comment_count,
                 )
+                db.add(snapshot)
+                snapshot_by_youtube_id[vdata.youtube_video_id] = snapshot
 
             seen_pages += 1
             page_token = page.next_page_token
             if not page_token or seen_pages >= 20:  # hard cap: never loop forever on a bad cursor
                 break
+
+        if access_token:
+            await _sync_channel_analytics(db, provider, channel, access_token, now, snapshot_by_youtube_id)
 
         channel.sync_status = SyncStatus.SUCCEEDED
         channel.last_synced_at = now
