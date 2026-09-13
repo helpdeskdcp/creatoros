@@ -7,6 +7,7 @@ import json
 import os
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 from celery import shared_task
@@ -62,6 +63,26 @@ async def _finish_job(
         await db.commit()
 
 
+@asynccontextmanager
+async def _tracked_job(job_type: str):
+    """Wraps a periodic/scheduled task body with Jobs-table observability
+    (start/end/duration/status/error) -- production audit found this
+    table had zero rows ever: _start_job/_finish_job existed but only
+    youtube_sync actually called them. Every beat-scheduled task below
+    now does. Yields the job's result dict for the caller to populate;
+    on any exception the job is marked FAILED with the real error and
+    the exception re-raises (Celery's own retry/backoff still applies)."""
+    job = await _start_job(job_type, None, None, {})
+    result: dict = {}
+    try:
+        yield result
+    except Exception as exc:
+        await _finish_job(job.id, JobStatus.FAILED, error=str(exc)[:2000])
+        raise
+    else:
+        await _finish_job(job.id, JobStatus.SUCCEEDED, result=result)
+
+
 @shared_task(bind=True, max_retries=5, default_retry_delay=60)
 def youtube_sync(self, channel_id: str, owner_user_id: str | None = None):
     async def _do():
@@ -87,13 +108,15 @@ def youtube_sync(self, channel_id: str, owner_user_id: str | None = None):
 @shared_task(bind=True, max_retries=3, default_retry_delay=120)
 def sync_all_channels(self):
     async def _do():
-        async with WorkerSessionLocal() as db:
-            from app.modules.channels.models import Channel
+        async with _tracked_job("sync_all_channels") as result:
+            async with WorkerSessionLocal() as db:
+                from app.modules.channels.models import Channel
 
-            channel_ids = list(await db.scalars(select(Channel.id)))
-        for cid in channel_ids:
-            youtube_sync.delay(str(cid))
-        return len(channel_ids)
+                channel_ids = list(await db.scalars(select(Channel.id)))
+            for cid in channel_ids:
+                youtube_sync.delay(str(cid))
+            result["channels_queued"] = len(channel_ids)
+        return result["channels_queued"]
 
     return _run(_do())
 
@@ -132,13 +155,15 @@ def trend_refresh(self, owner_user_id: str):
 @shared_task(bind=True, max_retries=3, default_retry_delay=300)
 def refresh_all_trends(self):
     async def _do():
-        async with WorkerSessionLocal() as db:
-            from app.modules.users.models import User
+        async with _tracked_job("refresh_all_trends") as result:
+            async with WorkerSessionLocal() as db:
+                from app.modules.users.models import User
 
-            user_ids = list(await db.scalars(select(User.id)))
-        for uid in user_ids:
-            trend_refresh.delay(str(uid))
-        return len(user_ids)
+                user_ids = list(await db.scalars(select(User.id)))
+            for uid in user_ids:
+                trend_refresh.delay(str(uid))
+            result["users_queued"] = len(user_ids)
+        return result["users_queued"]
 
     return _run(_do())
 
@@ -259,13 +284,16 @@ def temporary_media_cleanup_job():
     outside these two temp locations — permanent creator data
     (thumbnails, briefs, uploaded/rendered media) lives elsewhere and
     this job never sees it."""
-    ttl_seconds = 24 * 3600
-    now = time.time()
-    deleted = _sweep_flat_dir(os.path.join("storage", "tmp_uploads"), ttl_seconds, now)
-    deleted += _sweep_video_processing_dir(
-        get_settings().ffmpeg_temp_dir, ttl_seconds, now
-    )
-    return {"deleted": deleted}
+    async def _do():
+        async with _tracked_job("temporary_media_cleanup_job") as result:
+            ttl_seconds = 24 * 3600
+            now = time.time()
+            deleted = _sweep_flat_dir(os.path.join("storage", "tmp_uploads"), ttl_seconds, now)
+            deleted += _sweep_video_processing_dir(get_settings().ffmpeg_temp_dir, ttl_seconds, now)
+            result["deleted"] = deleted
+        return result
+
+    return _run(_do())
 
 
 @shared_task
@@ -307,18 +335,20 @@ def run_daily_growth_agent(owner_user_id: str | None = None):
             return actions_created
 
     async def _do_all():
-        async with WorkerSessionLocal() as db:
-            from app.modules.users.models import User
+        async with _tracked_job("run_daily_growth_agent") as result:
+            async with WorkerSessionLocal() as db:
+                from app.modules.users.models import User
 
-            user_ids = (
-                [uuid.UUID(owner_user_id)]
-                if owner_user_id
-                else list(await db.scalars(select(User.id)))
-            )
-        total = 0
-        for uid in user_ids:
-            total += await _do(uid)
-        return total
+                user_ids = (
+                    [uuid.UUID(owner_user_id)]
+                    if owner_user_id
+                    else list(await db.scalars(select(User.id)))
+                )
+            total = 0
+            for uid in user_ids:
+                total += await _do(uid)
+            result["actions_created"] = total
+        return result["actions_created"]
 
     return _run(_do_all())
 
@@ -361,10 +391,12 @@ def poll_pending_publishing_runs_task():
     a successful upload whose verify_publication() wasn't True on the
     first check would never transition to PUBLISHED."""
     async def _do():
-        async with WorkerSessionLocal() as db:
-            from app.modules.publishing.service import poll_pending_publishing_runs
+        async with _tracked_job("poll_pending_publishing_runs_task") as result:
+            async with WorkerSessionLocal() as db:
+                from app.modules.publishing.service import poll_pending_publishing_runs
 
-            return await poll_pending_publishing_runs(db)
+                result["value"] = await poll_pending_publishing_runs(db)
+        return result["value"]
 
     return _run(_do())
 
@@ -425,13 +457,15 @@ def poll_scheduled_publishing_runs_task():
     for each claimed run separately -- so one slow/failing upload can
     never block or delay any other creator's scheduled publish."""
     async def _do():
-        async with WorkerSessionLocal() as db:
-            from app.modules.publishing.service import claim_due_scheduled_run_ids
+        async with _tracked_job("poll_scheduled_publishing_runs_task") as result:
+            async with WorkerSessionLocal() as db:
+                from app.modules.publishing.service import claim_due_scheduled_run_ids
 
-            claimed = await claim_due_scheduled_run_ids(db)
-        for run_id in claimed:
-            execute_publishing_run.delay(str(run_id))
-        return {"claimed": len(claimed)}
+                claimed = await claim_due_scheduled_run_ids(db)
+            for run_id in claimed:
+                execute_publishing_run.delay(str(run_id))
+            result["claimed"] = len(claimed)
+        return result
 
     return _run(_do())
 
@@ -442,11 +476,12 @@ def purge_expired_ai_cache_task():
     -- a stale row is already never served as a hit, this just reclaims the
     table space on a schedule instead of letting it grow unbounded."""
     async def _do():
-        async with WorkerSessionLocal() as db:
-            from app.ai.cache import purge_expired_entries
+        async with _tracked_job("purge_expired_ai_cache_task") as result:
+            async with WorkerSessionLocal() as db:
+                from app.ai.cache import purge_expired_entries
 
-            deleted = await purge_expired_entries(db)
-        return {"deleted": deleted}
+                result["deleted"] = await purge_expired_entries(db)
+        return result
 
     return _run(_do())
 
@@ -458,18 +493,21 @@ def measure_video_update_impact_task():
     the Learning Loop only ever ingests measured, real outcomes, never an
     assumption that a change helped."""
     async def _do():
-        async with WorkerSessionLocal() as db:
-            from app.modules.video_updates.service import list_measurable_proposals, measure_update_impact
+        async with _tracked_job("measure_video_update_impact_task") as result:
+            async with WorkerSessionLocal() as db:
+                from app.modules.video_updates.service import list_measurable_proposals, measure_update_impact
 
-            candidates = await list_measurable_proposals(db)
-            measured, errors = 0, 0
-            for proposal in candidates:
-                try:
-                    await measure_update_impact(db, proposal.id, proposal.owner_user_id)
-                    measured += 1
-                except Exception as exc:  # noqa: BLE001
-                    logger.error("measure_video_update_impact_task failed for %s: %s", proposal.id, exc)
-                    errors += 1
-        return {"measured": measured, "errors": errors}
+                candidates = await list_measurable_proposals(db)
+                measured, errors = 0, 0
+                for proposal in candidates:
+                    try:
+                        await measure_update_impact(db, proposal.id, proposal.owner_user_id)
+                        measured += 1
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("measure_video_update_impact_task failed for %s: %s", proposal.id, exc)
+                        errors += 1
+            result["measured"] = measured
+            result["errors"] = errors
+        return result
 
     return _run(_do())
