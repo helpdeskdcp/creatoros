@@ -17,7 +17,7 @@ from app.core.data_quality import (
     insufficient_data,
     real_metric,
 )
-from app.modules.analytics.models import AnalyticsSnapshot
+from app.modules.analytics.models import AnalyticsSnapshot, GrowthAction
 from app.modules.analytics.schemas import (
     GrowthBottleneck,
     GrowthDiagnosisOut,
@@ -345,3 +345,26 @@ async def compute_subscriber_growth(db: AsyncSession, channel: Channel) -> Subsc
             0, "Returning-viewer data is not yet wired into the sync pipeline"
         ),
     )
+
+
+async def list_todays_growth_actions(db: AsyncSession, owner_user_id: uuid.UUID) -> list[GrowthAction]:
+    """The 'Today's AI Growth Missions' backend: GrowthAction rows already
+    exist (written by the run_daily_growth_agent Celery task) but nothing
+    in the API ever exposed them -- the production audit found this
+    surfaced nowhere in the app. Most recent run_date only (not literally
+    calendar-today, since the daily agent may not have run in the last
+    few hours yet)."""
+    latest_run_date = await db.scalar(
+        select(GrowthAction.run_date)
+        .where(GrowthAction.owner_user_id == owner_user_id)
+        .order_by(GrowthAction.run_date.desc())
+        .limit(1)
+    )
+    if latest_run_date is None:
+        return []
+    result = await db.scalars(
+        select(GrowthAction)
+        .where(GrowthAction.owner_user_id == owner_user_id, GrowthAction.run_date == latest_run_date)
+        .order_by(GrowthAction.priority)
+    )
+    return list(result)

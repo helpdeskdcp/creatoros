@@ -93,6 +93,21 @@ export interface GrowthBottleneck {
   sample_size: number;
 }
 
+export interface GrowthAction {
+  id: string;
+  channel_id: string | null;
+  run_date: string;
+  priority: number;
+  action_type: string;
+  title: string;
+  reason: string;
+  evidence: string | null;
+  expected_objective: string | null;
+  confidence: string;
+  requires_approval: boolean;
+  execution_status: string;
+}
+
 export interface GrowthDiagnosisOut {
   channel_id: string;
   computed_at: string;

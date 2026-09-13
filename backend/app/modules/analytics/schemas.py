@@ -62,3 +62,20 @@ class SubscriberGrowthOut(BaseModel):
     subscriber_conversion_rate: Metric
     subscribers_per_1000_views: Metric
     returning_viewer_rate: Metric
+
+
+class GrowthActionOut(BaseModel):
+    id: uuid.UUID
+    channel_id: uuid.UUID | None
+    run_date: datetime
+    priority: int
+    action_type: str
+    title: str
+    reason: str
+    evidence: str | None
+    expected_objective: str | None
+    confidence: str
+    requires_approval: bool
+    execution_status: str
+
+    model_config = {"from_attributes": True}

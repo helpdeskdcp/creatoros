@@ -7,7 +7,7 @@ import { MetricCard } from "@/components/metric-card";
 import { FormatComparisonCard } from "@/components/format-comparison-card";
 import { PageHeader, LoadingState, ErrorState, EmptyState, Badge } from "@/components/ui";
 import { api } from "@/lib/api";
-import type { Channel, ChannelIntelligence, GrowthDiagnosisOut, Recommendation } from "@/lib/types";
+import type { Channel, ChannelIntelligence, GrowthAction, GrowthDiagnosisOut, Recommendation } from "@/lib/types";
 
 export default function DashboardPage() {
   const channelsQuery = useQuery({
@@ -32,6 +32,11 @@ export default function DashboardPage() {
   const recommendationsQuery = useQuery({
     queryKey: ["recommendations"],
     queryFn: () => api.get<Recommendation[]>("/recommendations"),
+  });
+
+  const growthActionsQuery = useQuery({
+    queryKey: ["growth-actions"],
+    queryFn: () => api.get<GrowthAction[]>("/analytics/growth-actions"),
   });
 
   return (
@@ -94,6 +99,36 @@ export default function DashboardPage() {
             </div>
           )}
         </>
+      )}
+
+      <h2 className="mb-3 mt-8 text-lg font-semibold">Today&apos;s AI Growth Missions</h2>
+      {growthActionsQuery.isLoading && <LoadingState />}
+      {growthActionsQuery.data && growthActionsQuery.data.length === 0 && (
+        <EmptyState>
+          No missions yet — these are generated daily from your Growth Diagnosis bottlenecks
+          once the daily growth agent has run for your account.
+        </EmptyState>
+      )}
+      {growthActionsQuery.data && growthActionsQuery.data.length > 0 && (
+        <div className="mb-8 space-y-3">
+          {growthActionsQuery.data.map((mission) => (
+            <div key={mission.id} className="card p-4">
+              <div className="flex items-center gap-2">
+                <Badge>#{mission.priority}</Badge>
+                <Badge tone={mission.confidence === "HIGH" ? "success" : "warning"}>
+                  {mission.confidence} confidence
+                </Badge>
+                <Badge tone={mission.execution_status === "pending" ? "warning" : "success"}>
+                  {mission.execution_status}
+                </Badge>
+                {mission.requires_approval && <Badge tone="warning">Needs approval</Badge>}
+              </div>
+              <p className="mt-2 font-medium">{mission.title}</p>
+              <p className="mt-1 text-sm muted">{mission.reason}</p>
+              {mission.evidence && <p className="mt-1 text-xs muted">{mission.evidence}</p>}
+            </div>
+          ))}
+        </div>
       )}
 
       <h2 className="mb-3 mt-8 text-lg font-semibold">Next Best Video</h2>

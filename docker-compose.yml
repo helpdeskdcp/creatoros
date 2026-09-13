@@ -89,6 +89,17 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - creatoros_storage:/app/storage
+    healthcheck:
+      # Overrides the Dockerfile's HEALTHCHECK, which probes
+      # http://localhost:8000/health -- meaningless here since the worker
+      # process serves no HTTP endpoint at all (it was reporting
+      # "unhealthy" unconditionally; the process itself was fine, as its
+      # own logs of successfully completed tasks showed).
+      test: ["CMD-SHELL", "celery -A app.jobs.celery_app inspect ping -t 5 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
 
   beat:
     build:
@@ -107,6 +118,15 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      # celery beat has no RPC health endpoint the way workers do (inspect
+      # ping only reaches worker processes) -- a simple liveness check on
+      # the scheduler process itself is the standard approach.
+      test: ["CMD-SHELL", "pgrep -f 'celery.*beat' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
 
   frontend:
     build:
