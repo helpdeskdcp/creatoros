@@ -6,7 +6,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Text
+from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -25,6 +25,20 @@ class VideoUpdateStatus(str, enum.Enum):
     EXECUTING = "EXECUTING"
     SUCCEEDED_VERIFIED = "SUCCEEDED_VERIFIED"
     FAILED_NOT_VERIFIED = "FAILED_NOT_VERIFIED"
+
+
+class VideoUpdateImpact(str, enum.Enum):
+    """Classifies a change's REAL measured effect -- view VELOCITY
+    (views/day) before vs. after the change, never the immediate raw view
+    count (which only ever goes up and would make every change look like
+    a "win"). Never claims causation from correlation: this is a
+    correlational before/after comparison on one channel, not a
+    controlled experiment."""
+
+    WIN = "WIN"
+    NEUTRAL = "NEUTRAL"
+    LOSS = "LOSS"
+    INCONCLUSIVE = "INCONCLUSIVE"
 
 
 class VideoUpdateProposal(Base, UUIDPrimaryKeyMixin, TimestampMixin):
@@ -64,3 +78,13 @@ class VideoUpdateProposal(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     rollback_of_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("video_update_proposals.id", ondelete="SET NULL"), nullable=True
     )
+
+    # --- Performance measurement / learning loop (only meaningful once
+    # status == SUCCEEDED_VERIFIED) ---
+    observation_window_days: Mapped[int] = mapped_column(Integer, nullable=False, default=14)
+    baseline_view_velocity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    post_view_velocity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    impact_outcome: Mapped[VideoUpdateImpact | None] = mapped_column(
+        Enum(VideoUpdateImpact, name="video_update_impact"), nullable=True
+    )
+    impact_measured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

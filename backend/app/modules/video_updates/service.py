@@ -8,19 +8,26 @@ otherwise FAILED_NOT_VERIFIED, with the real error captured.
 """
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ConflictError, NotFoundError, ValidationError
+from app.core.timeutils import ensure_aware
 from app.modules.audit import service as audit_service
 from app.modules.channels.models import Channel
 from app.modules.channels.providers import get_youtube_provider
 from app.modules.channels.providers.base import YouTubeProviderError
 from app.modules.channels.service import _get_valid_access_token
-from app.modules.video_updates.models import VideoUpdateField, VideoUpdateProposal, VideoUpdateStatus
-from app.modules.videos.models import Video
+from app.modules.experiments.learning import _upsert_signal
+from app.modules.video_updates.models import (
+    VideoUpdateField,
+    VideoUpdateImpact,
+    VideoUpdateProposal,
+    VideoUpdateStatus,
+)
+from app.modules.videos.models import Video, VideoMetricSnapshot
 
 _MAX_TITLE_LEN = 100
 _MAX_DESCRIPTION_LEN = 5000
@@ -277,3 +284,121 @@ async def list_proposals(
         stmt = stmt.where(VideoUpdateProposal.video_id == video_id)
     stmt = stmt.order_by(VideoUpdateProposal.created_at.desc())
     return list(await db.scalars(stmt))
+
+
+_IMPACT_THRESHOLD = 0.15  # +/-15% relative velocity change to call WIN/LOSS
+_TOLERANCE_FRACTION = 0.3
+
+
+async def _closest_snapshot_value(
+    db: AsyncSession, video_id: uuid.UUID, target: datetime, tolerance: timedelta
+) -> int | None:
+    snapshots = list(
+        await db.scalars(
+            select(VideoMetricSnapshot).where(
+                VideoMetricSnapshot.video_id == video_id,
+                VideoMetricSnapshot.captured_at >= target - tolerance,
+                VideoMetricSnapshot.captured_at <= target + tolerance,
+            )
+        )
+    )
+    if not snapshots:
+        return None
+    closest = min(snapshots, key=lambda s: abs((ensure_aware(s.captured_at) - target).total_seconds()))
+    return closest.view_count
+
+
+async def measure_update_impact(
+    db: AsyncSession, proposal_id: uuid.UUID, owner_user_id: uuid.UUID
+) -> VideoUpdateProposal:
+    """Compares view VELOCITY (views/day) in the window before the change
+    to the window after it -- never the raw cumulative view count, which
+    only ever increases and would call every change a "win". This is a
+    correlational before/after comparison on one channel's own video, not
+    a controlled experiment -- it does not and cannot prove the metadata
+    change CAUSED the difference; it only measures whether one occurred."""
+    proposal = await get_owned_proposal(db, proposal_id, owner_user_id)
+    if proposal.status != VideoUpdateStatus.SUCCEEDED_VERIFIED:
+        raise ConflictError("Can only measure impact for a SUCCEEDED_VERIFIED proposal")
+    if proposal.impact_measured_at is not None:
+        raise ConflictError("Impact has already been measured for this proposal")
+
+    executed_at = ensure_aware(proposal.executed_at)
+    window = timedelta(days=proposal.observation_window_days)
+    now = datetime.now(UTC)
+    if now < executed_at + window:
+        raise ConflictError(
+            f"Observation window ({proposal.observation_window_days} days) has not elapsed yet"
+        )
+
+    tolerance = timedelta(days=max(1, proposal.observation_window_days * _TOLERANCE_FRACTION))
+    before = await _closest_snapshot_value(db, proposal.video_id, executed_at - window, tolerance)
+    at_change = await _closest_snapshot_value(db, proposal.video_id, executed_at, tolerance)
+    after = await _closest_snapshot_value(db, proposal.video_id, executed_at + window, tolerance)
+
+    if before is None or at_change is None or after is None:
+        proposal.impact_outcome = VideoUpdateImpact.INCONCLUSIVE
+        proposal.impact_measured_at = now
+        await db.commit()
+        return proposal
+
+    proposal.baseline_view_velocity = max(0, at_change - before) / proposal.observation_window_days
+    proposal.post_view_velocity = max(0, after - at_change) / proposal.observation_window_days
+
+    if proposal.baseline_view_velocity == 0:
+        outcome = (
+            VideoUpdateImpact.WIN if proposal.post_view_velocity > 0 else VideoUpdateImpact.INCONCLUSIVE
+        )
+    else:
+        delta_ratio = (
+            (proposal.post_view_velocity - proposal.baseline_view_velocity) / proposal.baseline_view_velocity
+        )
+        if delta_ratio >= _IMPACT_THRESHOLD:
+            outcome = VideoUpdateImpact.WIN
+        elif delta_ratio <= -_IMPACT_THRESHOLD:
+            outcome = VideoUpdateImpact.LOSS
+        else:
+            outcome = VideoUpdateImpact.NEUTRAL
+
+    proposal.impact_outcome = outcome
+    proposal.impact_measured_at = now
+    await db.commit()
+
+    # Only decisive outcomes feed the learning loop -- NEUTRAL/INCONCLUSIVE
+    # are real, honest results but not a signal either way.
+    if outcome in (VideoUpdateImpact.WIN, VideoUpdateImpact.LOSS):
+        await _upsert_signal(
+            db, owner_user_id, "video_metadata_update", proposal.field.value,
+            won=outcome is VideoUpdateImpact.WIN,
+        )
+        await db.commit()
+
+    await audit_service.record(
+        db, action_type="video_update_impact_measured", result="success", user_id=owner_user_id,
+        content_id=str(proposal.video_id),
+        after_state={
+            "outcome": outcome.value,
+            "baseline_velocity": proposal.baseline_view_velocity,
+            "post_velocity": proposal.post_view_velocity,
+        },
+    )
+    return proposal
+
+
+async def list_measurable_proposals(db: AsyncSession) -> list[VideoUpdateProposal]:
+    """SUCCEEDED_VERIFIED proposals whose observation window has elapsed
+    and haven't been measured yet -- used by the periodic measurement job."""
+    now = datetime.now(UTC)
+    candidates = list(
+        await db.scalars(
+            select(VideoUpdateProposal).where(
+                VideoUpdateProposal.status == VideoUpdateStatus.SUCCEEDED_VERIFIED,
+                VideoUpdateProposal.impact_measured_at.is_(None),
+                VideoUpdateProposal.executed_at.is_not(None),
+            )
+        )
+    )
+    return [
+        p for p in candidates
+        if now >= ensure_aware(p.executed_at) + timedelta(days=p.observation_window_days)
+    ]

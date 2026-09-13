@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.modules.video_updates.models import VideoUpdateField, VideoUpdateStatus
+from app.modules.video_updates.models import VideoUpdateField, VideoUpdateImpact, VideoUpdateStatus
 
 
 class ProposeVideoUpdateRequest(BaseModel):
@@ -30,6 +30,11 @@ class VideoUpdateProposalOut(BaseModel):
     verified_at: datetime | None
     error_message: str | None
     rollback_of_id: uuid.UUID | None
+    observation_window_days: int
+    baseline_view_velocity: float | None
+    post_view_velocity: float | None
+    impact_outcome: VideoUpdateImpact | None
+    impact_measured_at: datetime | None
     created_at: datetime
 
     model_config = {"from_attributes": True}

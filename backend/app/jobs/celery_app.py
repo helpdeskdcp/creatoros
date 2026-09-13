@@ -55,4 +55,8 @@ celery_app.conf.beat_schedule = {
         "task": "app.jobs.tasks.purge_expired_ai_cache_task",
         "schedule": 3600.0,
     },
+    "measure-video-update-impact": {
+        "task": "app.jobs.tasks.measure_video_update_impact_task",
+        "schedule": 3600.0 * 6,
+    },
 }

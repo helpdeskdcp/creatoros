@@ -449,3 +449,27 @@ def purge_expired_ai_cache_task():
         return {"deleted": deleted}
 
     return _run(_do())
+
+
+@shared_task
+def measure_video_update_impact_task():
+    """Finds SUCCEEDED_VERIFIED video-metadata changes whose observation
+    window has elapsed and measures their real view-velocity impact --
+    the Learning Loop only ever ingests measured, real outcomes, never an
+    assumption that a change helped."""
+    async def _do():
+        async with WorkerSessionLocal() as db:
+            from app.modules.video_updates.service import list_measurable_proposals, measure_update_impact
+
+            candidates = await list_measurable_proposals(db)
+            measured, errors = 0, 0
+            for proposal in candidates:
+                try:
+                    await measure_update_impact(db, proposal.id, proposal.owner_user_id)
+                    measured += 1
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("measure_video_update_impact_task failed for %s: %s", proposal.id, exc)
+                    errors += 1
+        return {"measured": measured, "errors": errors}
+
+    return _run(_do())

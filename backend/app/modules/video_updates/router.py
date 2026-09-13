@@ -58,3 +58,12 @@ async def rollback_proposal(
     user: User = Depends(require_editor),
 ):
     return await service.create_rollback(db, proposal_id, user.id)
+
+
+@router.post("/{proposal_id}/measure-impact", response_model=VideoUpdateProposalOut)
+async def measure_impact(
+    proposal_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return await service.measure_update_impact(db, proposal_id, user.id)
