@@ -24,6 +24,24 @@ class Competitor(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class CompetitorSnapshot(Base, UUIDPrimaryKeyMixin):
+    """Historical point-in-time record of a competitor's stats -- without
+    this, sync_competitor only ever overwrote the current values, making
+    real traction/velocity over time impossible to compute (the same gap
+    AnalyticsSnapshot/VideoMetricSnapshot already solve for the creator's
+    own channel)."""
+
+    __tablename__ = "competitor_snapshots"
+
+    competitor_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("competitors.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    subscriber_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    view_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    video_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+
 class CompetitorVideo(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "competitor_videos"
 

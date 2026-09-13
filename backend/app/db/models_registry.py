@@ -13,7 +13,11 @@ from app.modules.analytics.models import (  # noqa: F401
 )
 from app.modules.audit.models import AuditLog  # noqa: F401
 from app.modules.channels.models import Channel  # noqa: F401
-from app.modules.competitors.models import Competitor, CompetitorVideo  # noqa: F401
+from app.modules.competitors.models import (  # noqa: F401
+    Competitor,
+    CompetitorSnapshot,
+    CompetitorVideo,
+)
 from app.modules.content.models import ContentEvent, ContentItem  # noqa: F401
 from app.modules.distribution.models import DistributionAsset, DistributionCampaign  # noqa: F401
 from app.modules.experiments.models import (  # noqa: F401

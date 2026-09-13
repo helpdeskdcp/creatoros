@@ -3,9 +3,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { AppShell } from "@/components/app-shell";
-import { PageHeader, LoadingState, EmptyState, Button, Input } from "@/components/ui";
+import { PageHeader, LoadingState, EmptyState, Button, Input, Badge } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
-import type { Competitor } from "@/lib/types";
+import type { Competitor, Metric } from "@/lib/types";
 
 interface ContentGap {
   keyword: string;
@@ -15,10 +15,58 @@ interface ContentGap {
   signal: string;
 }
 
+interface FormatBreakdown {
+  shorts_count: number;
+  long_form_count: number;
+  quality: string;
+}
+
+interface GapToTopicResult {
+  keyword: string;
+  topic_id: string | null;
+  created: boolean;
+  reason: string | null;
+}
+
+function CompetitorStats({ competitorId }: { competitorId: string }) {
+  const tractionQuery = useQuery({
+    queryKey: ["competitor-traction", competitorId],
+    queryFn: () => api.get<Metric>(`/competitors/${competitorId}/traction`),
+  });
+  const cadenceQuery = useQuery({
+    queryKey: ["competitor-cadence", competitorId],
+    queryFn: () => api.get<Metric>(`/competitors/${competitorId}/cadence`),
+  });
+  const formatsQuery = useQuery({
+    queryKey: ["competitor-formats", competitorId],
+    queryFn: () => api.get<FormatBreakdown>(`/competitors/${competitorId}/formats`),
+  });
+
+  return (
+    <div className="mt-2 flex flex-wrap gap-3 text-xs muted">
+      <span>
+        Traction:{" "}
+        {tractionQuery.data?.quality === "REAL" ? `${tractionQuery.data.value} subs/week` : "insufficient data yet"}
+      </span>
+      <span>
+        Cadence:{" "}
+        {cadenceQuery.data?.quality === "REAL" ? `${cadenceQuery.data.value} uploads/week` : "insufficient data yet"}
+      </span>
+      <span>
+        Format:{" "}
+        {formatsQuery.data && formatsQuery.data.quality === "REAL"
+          ? `${formatsQuery.data.shorts_count} shorts / ${formatsQuery.data.long_form_count} long-form`
+          : "insufficient data yet"}
+      </span>
+    </div>
+  );
+}
+
 export default function CompetitorsPage() {
   const queryClient = useQueryClient();
   const [channelId, setChannelId] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [gapToTopicResults, setGapToTopicResults] = useState<GapToTopicResult[] | null>(null);
 
   const competitorsQuery = useQuery({
     queryKey: ["competitors"],
@@ -42,6 +90,14 @@ export default function CompetitorsPage() {
   const syncMutation = useMutation({
     mutationFn: (id: string) => api.post<Competitor>(`/competitors/${id}/sync`),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["competitors"] }),
+  });
+
+  const gapsToTopicsMutation = useMutation({
+    mutationFn: () => api.post<GapToTopicResult[]>("/competitors/opportunities/content-gaps/create-topics"),
+    onSuccess: (results) => {
+      setGapToTopicResults(results);
+      queryClient.invalidateQueries({ queryKey: ["topics"] });
+    },
   });
 
   return (
@@ -72,29 +128,54 @@ export default function CompetitorsPage() {
       {competitorsQuery.data?.length === 0 && <EmptyState>No competitors tracked yet.</EmptyState>}
       <div className="space-y-3">
         {competitorsQuery.data?.map((c) => (
-          <div key={c.id} className="card flex items-center justify-between p-4">
-            <div>
-              <div className="font-medium">{c.title}</div>
-              <div className="text-xs muted">
-                {c.subscriber_count?.toLocaleString() ?? "—"} subscribers ·{" "}
-                {c.video_count?.toLocaleString() ?? "—"} videos
+          <div key={c.id} className="card p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="font-medium">{c.title}</div>
+                <div className="text-xs muted">
+                  {c.subscriber_count?.toLocaleString() ?? "—"} subscribers ·{" "}
+                  {c.video_count?.toLocaleString() ?? "—"} videos
+                </div>
               </div>
+              <Button variant="secondary" onClick={() => syncMutation.mutate(c.id)}>
+                Sync
+              </Button>
             </div>
-            <Button variant="secondary" onClick={() => syncMutation.mutate(c.id)}>
-              Sync
-            </Button>
+            <CompetitorStats competitorId={c.id} />
           </div>
         ))}
       </div>
 
-      <h2 className="mb-3 mt-8 text-lg font-semibold">Content Gaps</h2>
+      <div className="mb-3 mt-8 flex items-center justify-between">
+        <h2 className="text-lg font-semibold">Content Gaps</h2>
+        <Button
+          variant="secondary"
+          onClick={() => gapsToTopicsMutation.mutate()}
+          disabled={gapsToTopicsMutation.isPending || gapsQuery.data?.length === 0}
+        >
+          Turn top gaps into Topics
+        </Button>
+      </div>
+      {gapToTopicResults && (
+        <div className="mb-3 space-y-1 text-xs muted">
+          {gapToTopicResults.map((r) => (
+            <div key={r.keyword}>
+              &ldquo;{r.keyword}&rdquo;: {r.created ? "topic created" : "already existed"}
+              {r.reason ? ` — ${r.reason}` : ""}
+            </div>
+          ))}
+        </div>
+      )}
       {gapsQuery.data?.length === 0 && (
         <EmptyState>Track at least 2 competitors and sync them to detect content gaps.</EmptyState>
       )}
       <div className="space-y-2">
         {gapsQuery.data?.map((g) => (
-          <div key={g.keyword} className="card p-3 text-sm">
-            <span className="font-medium">{g.keyword}</span> — {g.signal}
+          <div key={g.keyword} className="card flex items-center justify-between p-3 text-sm">
+            <span>
+              <span className="font-medium">{g.keyword}</span> — {g.signal}
+            </span>
+            {!g.creator_has_covered && <Badge tone="warning">Gap</Badge>}
           </div>
         ))}
       </div>

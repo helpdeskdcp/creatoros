@@ -44,3 +44,16 @@ class ContentGap(BaseModel):
     total_competitor_views: int
     creator_has_covered: bool
     signal: str
+
+
+class FormatBreakdown(BaseModel):
+    shorts_count: int
+    long_form_count: int
+    quality: str  # "REAL" | "INSUFFICIENT_DATA"
+
+
+class GapToTopicResult(BaseModel):
+    keyword: str
+    topic_id: uuid.UUID | None
+    created: bool
+    reason: str | None = None
