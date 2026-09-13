@@ -7,6 +7,7 @@ from sqlalchemy.orm import selectinload
 
 from app.ai.cache import cached_generate
 from app.ai.orchestrator import AIOrchestrator
+from app.ai.router import AIMode
 from app.modules.scripts.models import Script, ScriptFormat, ScriptVersion
 from app.modules.scripts.schemas import _GeneratedScript
 
@@ -80,6 +81,7 @@ async def _generate_version(
         schema=_GeneratedScript,
         max_tokens=3000,
         user_id=owner_user_id,
+        mode=AIMode.FAST,
     )
 
     full_text = "\n\n".join(

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.cache import cached_generate
 from app.ai.orchestrator import AIOrchestrator
+from app.ai.router import AIMode
 from app.modules.distribution.models import DistributionAsset, DistributionCampaign
 from app.modules.distribution.schemas import GeneratedAssetsResponse
 
@@ -70,6 +71,7 @@ async def generate_assets(
         user_prompt=user_prompt,
         schema=GeneratedAssetsResponse,
         user_id=campaign.owner_user_id,
+        mode=AIMode.FAST,
     )
 
     assets: list[DistributionAsset] = []

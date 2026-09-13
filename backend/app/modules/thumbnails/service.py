@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.cache import cached_generate
 from app.ai.orchestrator import AIOrchestrator
+from app.ai.router import AIMode
 from app.modules.thumbnails.models import ThumbnailBrief
 from app.modules.thumbnails.schemas import _GeneratedThumbnailBrief
 
@@ -34,6 +35,7 @@ async def generate_thumbnail_brief(
         user_prompt=user_prompt,
         schema=_GeneratedThumbnailBrief,
         user_id=owner_user_id,
+        mode=AIMode.FAST,
     )
 
     brief = ThumbnailBrief(

@@ -18,7 +18,7 @@ class _CountingProvider(AIProvider):
     async def is_available(self) -> bool:
         return True
 
-    async def complete(self, messages, *, temperature=0.4, max_tokens=2000, json_mode=False):
+    async def complete(self, messages, *, temperature=0.4, max_tokens=2000, json_mode=False, think=False, model=None):
         self.calls += 1
         return AICompletionResult(
             text=json.dumps(self._response), provider=self.name, model="counting-1",

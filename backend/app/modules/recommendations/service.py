@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.cache import cached_generate
 from app.ai.orchestrator import AIOrchestrator
+from app.ai.router import AIMode
 from app.core.data_quality import MIN_SAMPLE_SIZE_RECOMMENDATION, Confidence
 from app.modules.recommendations.models import Recommendation
 from app.modules.recommendations.schemas import _GeneratedRecommendationDetail
@@ -89,6 +90,7 @@ async def generate_next_best_videos(
             user_prompt=user_prompt,
             schema=_GeneratedRecommendationDetail,
             user_id=owner_user_id,
+        mode=AIMode.FAST,
         )
 
         rec = Recommendation(

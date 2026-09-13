@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.cache import cached_generate
 from app.ai.orchestrator import AIOrchestrator
+from app.ai.router import AIMode
 from app.modules.experiments.learning import get_learning_context_text
 from app.modules.hooks.models import Hook
 from app.modules.hooks.schemas import GeneratedHooksResponse
@@ -40,6 +41,7 @@ async def generate_hooks(
         user_prompt=user_prompt,
         schema=GeneratedHooksResponse,
         user_id=owner_user_id,
+        mode=AIMode.FAST,
     )
 
     hooks: list[Hook] = []

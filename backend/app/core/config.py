@@ -57,10 +57,32 @@ class Settings(BaseSettings):
     ai_primary_provider: str = "ollama"
     ai_fallback_provider: str = ""
     ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "qwen3-mini"
+    # FAST_SMALL tier: the default Ollama model for routine generation/
+    # classification tasks (titles, hooks, SEO, captions, summaries, ...).
+    # Benchmarked fastest FAST-mode (think=false) average latency among the
+    # models installed on this VPS -- see scripts/benchmark_ollama.py and
+    # scripts/ollama_benchmark_results.json.
+    ollama_model: str = "qwen3-mini:latest"
+    # CODING tier: reserved for any future coding-flavored generation task.
+    # No current CreatorOS call site is a coding task -- content-engine
+    # features (titles/hooks/SEO/scripts/thumbnails) are copywriting, not
+    # code generation -- so this is unused today but benchmarked and ready.
+    ollama_coding_model: str = "qwen2.5-coder:1.5b"
+    # DEEP tier: only the qwen3 family on this VPS supports think=true at
+    # all (gemma2/qwen2.5-coder return a hard 400 "does not support
+    # thinking" -- verified in scripts/ollama_benchmark_results.json).
+    ollama_deep_model: str = "qwen3:1.7b"
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o-mini"
+    # Bounds simultaneous in-flight Ollama requests on this CPU-only, single-
+    # model-loaded (OLLAMA_NUM_PARALLEL=1) host so a burst of requests queues
+    # instead of all starving each other for CPU. See app/ai/concurrency.py.
+    ollama_max_concurrent_requests: int = 2
+    ollama_queue_wait_timeout_seconds: float = 30.0
+    # How long a cached AI result may be reused before it's treated as
+    # stale and regenerated -- see app/ai/cache.py.
+    ai_cache_ttl_hours: int = 24
 
     # --- Billing ---
     billing_provider: str = "none"  # "none" (default -- CONFIGURATION_REQUIRED) or "stripe"

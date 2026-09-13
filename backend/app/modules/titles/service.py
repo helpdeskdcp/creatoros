@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.cache import cached_generate
 from app.ai.orchestrator import AIOrchestrator
+from app.ai.router import AIMode
 from app.modules.experiments.learning import get_learning_context_text
 from app.modules.titles.models import Title
 from app.modules.titles.schemas import GeneratedTitlesResponse
@@ -38,6 +39,7 @@ async def generate_titles(
         user_prompt=user_prompt,
         schema=GeneratedTitlesResponse,
         user_id=owner_user_id,
+        mode=AIMode.FAST,
     )
 
     titles: list[Title] = []

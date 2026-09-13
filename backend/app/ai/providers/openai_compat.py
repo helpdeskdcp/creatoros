@@ -2,7 +2,15 @@
 (vLLM, together.ai, groq, etc. all speak this same wire format)."""
 import httpx
 
-from app.ai.providers.base import AICompletionResult, AIMessage, AIProvider, AIProviderError
+from app.ai.providers.base import (
+    AICompletionResult,
+    AIGenerationTimeoutError,
+    AIMessage,
+    AIProvider,
+    AIProviderError,
+    AIProviderUnavailableError,
+    ModelNotAvailableError,
+)
 
 
 class OpenAICompatProvider(AIProvider):
@@ -23,12 +31,18 @@ class OpenAICompatProvider(AIProvider):
         temperature: float = 0.4,
         max_tokens: int = 2000,
         json_mode: bool = False,
+        think: bool = False,
+        model: str | None = None,
     ) -> AICompletionResult:
+        # `think` (Ollama's qwen3 "extended reasoning" toggle) has no
+        # equivalent on a plain chat-completions model like gpt-4o-mini --
+        # accepted for interface compatibility with AIProvider, ignored here.
         if not self._api_key:
-            raise AIProviderError("OPENAI_API_KEY is not configured")
+            raise AIProviderUnavailableError("OPENAI_API_KEY is not configured")
 
+        resolved_model = model or self._model
         payload = {
-            "model": self._model,
+            "model": resolved_model,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -42,9 +56,17 @@ class OpenAICompatProvider(AIProvider):
                 resp = await client.post(
                     f"{self._base_url}/chat/completions", json=payload, headers=headers
                 )
+        except httpx.ReadTimeout as exc:
+            raise AIGenerationTimeoutError(
+                f"{self._base_url} did not respond within 60s"
+            ) from exc
         except httpx.TransportError as exc:
-            raise AIProviderError(f"OpenAI-compatible endpoint unreachable: {self._base_url}") from exc
+            raise AIProviderUnavailableError(
+                f"OpenAI-compatible endpoint unreachable: {self._base_url}"
+            ) from exc
 
+        if resp.status_code == 404:
+            raise ModelNotAvailableError(f"Model '{resolved_model}' is not available at {self._base_url}")
         if resp.status_code != 200:
             raise AIProviderError(f"OpenAI-compatible API returned {resp.status_code}: {resp.text}")
 
@@ -54,7 +76,7 @@ class OpenAICompatProvider(AIProvider):
         return AICompletionResult(
             text=choice,
             provider=self.name,
-            model=self._model,
+            model=resolved_model,
             prompt_tokens=usage.get("prompt_tokens"),
             completion_tokens=usage.get("completion_tokens"),
         )

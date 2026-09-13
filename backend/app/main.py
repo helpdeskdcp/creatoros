@@ -140,6 +140,42 @@ def _register_observability(app: FastAPI) -> None:
             "# TYPE creatoros_db_pool_checked_out gauge",
             f"creatoros_db_pool_checked_out {checked_out}",
         ]
+
+        from app.ai.metrics import get_metrics_summary
+        from app.db.session import AsyncSessionLocal
+
+        try:
+            async with AsyncSessionLocal() as db:
+                summary = await get_metrics_summary(db, since_minutes=60)
+            lines += [
+                "# HELP creatoros_ai_requests_total AI generation requests in the last 60m",
+                "# TYPE creatoros_ai_requests_total gauge",
+                f"creatoros_ai_requests_total {summary.count}",
+                "# HELP creatoros_ai_failure_rate AI request failure rate in the last 60m",
+                "# TYPE creatoros_ai_failure_rate gauge",
+                f"creatoros_ai_failure_rate {summary.failure_rate}",
+                "# HELP creatoros_ai_cache_hit_rate AI cache hit rate in the last 60m",
+                "# TYPE creatoros_ai_cache_hit_rate gauge",
+                f"creatoros_ai_cache_hit_rate {summary.cache_hit_rate}",
+            ]
+            if summary.avg_latency_ms is not None:
+                lines += [
+                    "# HELP creatoros_ai_latency_avg_ms Average AI request latency (ms), last 60m",
+                    "# TYPE creatoros_ai_latency_avg_ms gauge",
+                    f"creatoros_ai_latency_avg_ms {summary.avg_latency_ms}",
+                    "# HELP creatoros_ai_latency_p95_ms P95 AI request latency (ms), last 60m",
+                    "# TYPE creatoros_ai_latency_p95_ms gauge",
+                    f"creatoros_ai_latency_p95_ms {summary.p95_latency_ms}",
+                ]
+            if summary.avg_queue_wait_ms is not None:
+                lines += [
+                    "# HELP creatoros_ai_queue_wait_avg_ms Average Ollama queue wait (ms), last 60m",
+                    "# TYPE creatoros_ai_queue_wait_avg_ms gauge",
+                    f"creatoros_ai_queue_wait_avg_ms {summary.avg_queue_wait_ms}",
+                ]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ai_metrics_endpoint_failed", error=str(exc))
+
         return "\n".join(lines) + "\n"
 
 

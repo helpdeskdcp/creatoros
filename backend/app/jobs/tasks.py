@@ -434,3 +434,18 @@ def poll_scheduled_publishing_runs_task():
         return {"claimed": len(claimed)}
 
     return _run(_do())
+
+
+@shared_task
+def purge_expired_ai_cache_task():
+    """AI generation cache entries carry an explicit TTL (see app/ai/cache.py)
+    -- a stale row is already never served as a hit, this just reclaims the
+    table space on a schedule instead of letting it grow unbounded."""
+    async def _do():
+        async with WorkerSessionLocal() as db:
+            from app.ai.cache import purge_expired_entries
+
+            deleted = await purge_expired_entries(db)
+        return {"deleted": deleted}
+
+    return _run(_do())

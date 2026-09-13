@@ -17,7 +17,7 @@ class _ScriptedProvider(AIProvider):
     async def is_available(self) -> bool:
         return True
 
-    async def complete(self, messages, *, temperature=0.4, max_tokens=2000, json_mode=False):
+    async def complete(self, messages, *, temperature=0.4, max_tokens=2000, json_mode=False, think=False, model=None):
         self.calls += 1
         text = self._responses.pop(0)
         return AICompletionResult(
@@ -31,7 +31,7 @@ class _AlwaysFailsProvider(AIProvider):
     async def is_available(self) -> bool:
         return False
 
-    async def complete(self, messages, *, temperature=0.4, max_tokens=2000, json_mode=False):
+    async def complete(self, messages, *, temperature=0.4, max_tokens=2000, json_mode=False, think=False, model=None):
         raise AIProviderError("simulated provider outage")
 
 
@@ -45,10 +45,11 @@ async def test_generate_structured_happy_path():
     provider = _ScriptedProvider([json.dumps({"title": "Great Video", "score": 91.5})])
     orchestrator = AIOrchestrator(primary=provider)
 
-    result = await orchestrator.generate_structured(
+    result, completion = await orchestrator.generate_structured(
         task="test", system_prompt="sys", user_prompt="user", schema=_Schema
     )
     assert result.title == "Great Video"
+    assert completion.provider == "scripted"
     assert result.score == 91.5
 
 
@@ -59,7 +60,7 @@ async def test_generate_structured_retries_on_invalid_json_then_succeeds():
     )
     orchestrator = AIOrchestrator(primary=provider)
 
-    result = await orchestrator.generate_structured(
+    result, _completion = await orchestrator.generate_structured(
         task="test", system_prompt="sys", user_prompt="user", schema=_Schema, max_retries=2
     )
     assert result.title == "Fixed"
@@ -72,7 +73,7 @@ async def test_generate_structured_falls_back_to_secondary_provider():
     fallback = _ScriptedProvider([json.dumps({"title": "From fallback", "score": 10})])
     orchestrator = AIOrchestrator(primary=primary, fallback=fallback)
 
-    result = await orchestrator.generate_structured(
+    result, _completion = await orchestrator.generate_structured(
         task="test", system_prompt="sys", user_prompt="user", schema=_Schema, max_retries=1
     )
     assert result.title == "From fallback"

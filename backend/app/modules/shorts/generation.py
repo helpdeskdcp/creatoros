@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from app.ai.cache import cached_generate
 from app.ai.orchestrator import AIOrchestrator
+from app.ai.router import AIMode
 
 SYSTEM_PROMPT = (
     "You are CreatorOS's Short-form Metadata Engine. Given a transcript excerpt "
@@ -39,4 +40,5 @@ async def generate_short_metadata(
         user_prompt=user_prompt,
         schema=_GeneratedShortMetadata,
         user_id=owner_user_id,
+        mode=AIMode.FAST,
     )

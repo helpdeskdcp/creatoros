@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.cache import cached_generate
 from app.ai.orchestrator import AIOrchestrator
+from app.ai.router import AIMode
 from app.modules.seo.models import SeoRecord
 from app.modules.seo.schemas import _GeneratedSeo
 
@@ -31,6 +32,7 @@ async def generate_seo(
         user_prompt=f"Video title: {title}\nVideo description/summary: {description}",
         schema=_GeneratedSeo,
         user_id=owner_user_id,
+        mode=AIMode.FAST,
     )
 
     record = SeoRecord(

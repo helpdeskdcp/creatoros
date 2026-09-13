@@ -30,6 +30,29 @@ class AIProviderError(Exception):
     whether to retry or fall back to a secondary provider."""
 
 
+class AIProviderUnavailableError(AIProviderError):
+    """The provider itself could not be reached at all (connection refused,
+    DNS failure, transport error) -- distinct from a request that reached
+    the provider and failed. Surfaces to callers as AI_PROVIDER_UNAVAILABLE."""
+
+
+class ModelNotAvailableError(AIProviderError):
+    """The provider was reachable but the requested model is not installed/
+    loadable there. Surfaces to callers as MODEL_NOT_AVAILABLE."""
+
+
+class AIGenerationTimeoutError(AIProviderError):
+    """The provider did not respond within the configured timeout. Surfaces
+    to callers as AI_GENERATION_TIMEOUT."""
+
+
+class AIQueueBusyError(AIProviderError):
+    """The local concurrency gate is saturated and the request timed out
+    waiting for a worker slot rather than for the model itself. Surfaces to
+    callers as AI_QUEUE_BUSY. Never raised by an external provider (only
+    the bounded-concurrency wrapper around a local provider)."""
+
+
 class AIProvider(ABC):
     name: str
 
@@ -41,7 +64,21 @@ class AIProvider(ABC):
         temperature: float = 0.4,
         max_tokens: int = 2000,
         json_mode: bool = False,
-    ) -> AICompletionResult: ...
+        think: bool = False,
+        model: str | None = None,
+    ) -> AICompletionResult:
+        """`think` requests extended reasoning (Ollama's qwen3-family
+        "thinking" mode) when the provider/model supports it. FAST mode
+        (the CreatorOS default for every routine task) always passes
+        think=False; DEEP mode passes True. A provider that has no concept
+        of extended thinking (e.g. plain OpenAI chat models) simply ignores
+        the flag rather than erroring.
+
+        `model` overrides the provider's configured default model for this
+        one call -- how app.ai.router's per-tier model routing reaches a
+        provider without constructing a separate provider instance per
+        tier."""
+        ...
 
     @abstractmethod
     async def is_available(self) -> bool:

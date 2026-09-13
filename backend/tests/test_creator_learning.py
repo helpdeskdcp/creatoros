@@ -112,7 +112,7 @@ class _CapturingProvider(AIProvider):
     async def is_available(self) -> bool:
         return True
 
-    async def complete(self, messages, *, temperature=0.4, max_tokens=2000, json_mode=False):
+    async def complete(self, messages, *, temperature=0.4, max_tokens=2000, json_mode=False, think=False, model=None):
         self.received_messages = messages
         return AICompletionResult(
             text=json.dumps(self._response_json), provider=self.name, model="capturing-1",
