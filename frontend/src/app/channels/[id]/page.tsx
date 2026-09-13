@@ -5,9 +5,64 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { MetricCard } from "@/components/metric-card";
-import { PageHeader, LoadingState, ErrorState, Button, Input } from "@/components/ui";
+import { PageHeader, LoadingState, ErrorState, Button, Input, Badge } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import type { Channel, ChannelIntelligence, VideoOut } from "@/lib/types";
+
+interface ThumbnailAnalysis {
+  id: string;
+  width: number;
+  height: number;
+  meets_min_resolution: boolean;
+  meets_aspect_ratio: boolean;
+  contrast_score: number;
+  brightness_score: number;
+  colorfulness_score: number;
+  subject_prominence_score: number;
+  recommendations: string[];
+}
+
+function ThumbnailVisionAnalysis({ video }: { video: VideoOut }) {
+  const [showResult, setShowResult] = useState(false);
+  const analyzeMutation = useMutation({
+    mutationFn: () => api.post<ThumbnailAnalysis>(`/thumbnail-vision/videos/${video.id}/analyze`),
+    onSuccess: () => setShowResult(true),
+  });
+
+  return (
+    <div>
+      <Button variant="secondary" onClick={() => analyzeMutation.mutate()} disabled={analyzeMutation.isPending}>
+        {analyzeMutation.isPending ? "Analyzing…" : "Analyze thumbnail"}
+      </Button>
+      {analyzeMutation.isError && (
+        <p className="mt-1 text-xs text-red-600 dark:text-red-400">
+          {analyzeMutation.error instanceof ApiError ? analyzeMutation.error.message : "Analysis failed"}
+        </p>
+      )}
+      {showResult && analyzeMutation.data && (
+        <div className="mt-2 rounded border p-2 text-xs" style={{ borderColor: "rgb(var(--border))" }}>
+          <div className="mb-1 flex flex-wrap gap-2">
+            <Badge tone={analyzeMutation.data.meets_min_resolution ? "success" : "warning"}>
+              {analyzeMutation.data.width}x{analyzeMutation.data.height}
+            </Badge>
+            <Badge>Contrast {analyzeMutation.data.contrast_score}</Badge>
+            <Badge>Brightness {analyzeMutation.data.brightness_score}</Badge>
+            <Badge>Colorfulness {analyzeMutation.data.colorfulness_score}</Badge>
+          </div>
+          {analyzeMutation.data.recommendations.length === 0 ? (
+            <p className="muted">No issues found by the automated checks.</p>
+          ) : (
+            <ul className="list-disc space-y-1 pl-4">
+              {analyzeMutation.data.recommendations.map((r, i) => (
+                <li key={i}>{r}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function ProposeTitleUpdate({ video }: { video: VideoOut }) {
   const queryClient = useQueryClient();
@@ -116,7 +171,10 @@ export default function ChannelDetailPage() {
                   {v.published_at ? new Date(v.published_at).toLocaleDateString() : "—"}
                 </td>
                 <td className="min-w-[220px] py-2 pr-4">
-                  <ProposeTitleUpdate video={v} />
+                  <div className="flex flex-col gap-2">
+                    <ProposeTitleUpdate video={v} />
+                    <ThumbnailVisionAnalysis video={v} />
+                  </div>
                 </td>
               </tr>
             ))}

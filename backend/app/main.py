@@ -76,6 +76,7 @@ def _register_routers(app: FastAPI, settings) -> None:
     from app.modules.trends.router import router as trends_router
     from app.modules.users.router import router as users_router
     from app.modules.predictions.router import router as predictions_router
+    from app.modules.thumbnail_vision.router import router as thumbnail_vision_router
     from app.modules.video_updates.router import router as video_updates_router
     from app.modules.videos.router import router as videos_router
 
@@ -88,6 +89,9 @@ def _register_routers(app: FastAPI, settings) -> None:
         video_updates_router, prefix=f"{prefix}/video-updates", tags=["video-updates"]
     )
     app.include_router(predictions_router, prefix=f"{prefix}/predictions", tags=["predictions"])
+    app.include_router(
+        thumbnail_vision_router, prefix=f"{prefix}/thumbnail-vision", tags=["thumbnail-vision"]
+    )
     app.include_router(
         competitors_router, prefix=f"{prefix}/competitors", tags=["competitors"]
     )
