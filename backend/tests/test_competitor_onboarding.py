@@ -1,6 +1,5 @@
 """Competitor onboarding by @handle/URL/search -- a creator must never have
 to know or paste a raw UCxxxxxxxx channel id (production audit finding)."""
-import uuid
 
 import pytest
 

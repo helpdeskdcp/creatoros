@@ -34,7 +34,7 @@ async def _run(args: list[str], timeout: float) -> tuple[str, str]:
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         proc.kill()
         await proc.wait()
         raise FFmpegError(f"{args[0]} timed out after {timeout}s") from exc
@@ -87,6 +87,24 @@ async def extract_audio(video_path: str, output_wav_path: str, *, timeout: float
     )
     if not os.path.isfile(output_wav_path) or os.path.getsize(output_wav_path) == 0:
         raise FFmpegError(f"Audio extraction produced no output for {video_path}")
+
+
+async def extract_thumbnail(
+    video_path: str, output_jpg_path: str, *, at_seconds: float = 0.5, timeout: float = 30.0
+) -> None:
+    """Grabs a single frame as a JPEG thumbnail -- used for generated
+    video outputs (app.video pipeline), which have no separate thumbnail
+    asset of their own the way an uploaded YouTube video does."""
+    os.makedirs(os.path.dirname(output_jpg_path), exist_ok=True)
+    await _run(
+        [
+            "ffmpeg", "-y", "-ss", str(at_seconds), "-i", video_path,
+            "-frames:v", "1", "-q:v", "2", output_jpg_path,
+        ],
+        timeout=timeout,
+    )
+    if not os.path.isfile(output_jpg_path) or os.path.getsize(output_jpg_path) == 0:
+        raise FFmpegError(f"Thumbnail extraction produced no output for {video_path}")
 
 
 async def render_vertical_clip(

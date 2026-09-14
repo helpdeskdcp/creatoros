@@ -9,7 +9,7 @@ import uuid
 import pytest
 from PIL import Image
 
-from app.core.errors import ValidationError, NotFoundError
+from app.core.errors import NotFoundError, ValidationError
 from app.modules.channels.models import Channel
 from app.modules.thumbnail_vision import analysis
 from app.modules.thumbnail_vision import service as tv_service

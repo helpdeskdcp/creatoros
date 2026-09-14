@@ -6,14 +6,14 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 
 from app.core.crypto import encrypt
 from app.modules.analytics import service as analytics_service
-from app.modules.channels.models import Channel, SyncStatus
+from app.modules.channels.models import Channel
 from app.modules.notifications.models import Notification, NotificationEvent
 from app.modules.users.models import User, UserRole
 from app.modules.videos.models import Video, VideoMetricSnapshot
-from sqlalchemy import select
 
 
 async def _make_user_and_channel(db_session, email: str, **channel_kwargs) -> tuple[User, Channel]:

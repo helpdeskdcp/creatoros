@@ -1,0 +1,373 @@
+"""VideoModelRouter: turns a generation request into a ranked list of
+models (primary + fallback chain), never a single hard-coded choice.
+
+Two-phase selection, deliberately never blurred together:
+  1. HARD CAPABILITY GATE -- a model that cannot satisfy a required
+     capability (duration/resolution/aspect ratio/frame control/audio) is
+     removed from consideration entirely. This is a filter, not a score
+     component: "closest match" only ever applies among models that pass
+     the gate for whatever configuration is ultimately requested.
+  2. SCORING -- among gate-surviving models, a weighted routing_score
+     (mode-dependent weights) ranks them; the top-ranked model is primary,
+     the rest (in score order) form the fallback chain.
+
+If NOTHING passes the gate for the user's exact request, resolve_request()
+searches for the closest valid configuration (degrade resolution, widen
+duration to the nearest supported value, or drop audio) rather than ever
+submitting a request no model can honestly fulfill.
+"""
+import json
+from dataclasses import dataclass, field
+
+from app.core.logging import get_logger
+from app.modules.video_generation.models import VideoGenerationType, VideoPriorityMode
+from app.video.models import CircuitState, VideoModelCatalogEntry
+
+logger = get_logger("video.router")
+
+# routing_score weight vectors per priority mode. All components are
+# normalized to [0, 1] before weighting (see _score_model), so these
+# weights are directly comparable/tunable in one place.
+_WEIGHTS: dict[VideoPriorityMode, dict[str, float]] = {
+    VideoPriorityMode.QUALITY: {
+        "quality": 3.0, "resolution": 1.5, "aspect_ratio": 0.5, "duration": 0.5,
+        "audio": 0.5, "reliability": 1.0, "latency": 0.2, "cost": 0.1,
+    },
+    VideoPriorityMode.FAST: {
+        "quality": 0.5, "resolution": 0.5, "aspect_ratio": 0.5, "duration": 0.5,
+        "audio": 0.3, "reliability": 1.0, "latency": 2.5, "cost": 0.3,
+    },
+    VideoPriorityMode.LOW_COST: {
+        "quality": 0.3, "resolution": 0.5, "aspect_ratio": 0.5, "duration": 0.5,
+        "audio": 0.3, "reliability": 0.8, "latency": 0.3, "cost": 2.5,
+    },
+    VideoPriorityMode.FREE_FIRST: {
+        # Free-vs-paid is enforced as a hard pre-filter (see
+        # _split_free_first), so among the remaining candidates this is
+        # identical to LOW_COST.
+        "quality": 0.3, "resolution": 0.5, "aspect_ratio": 0.5, "duration": 0.5,
+        "audio": 0.3, "reliability": 0.8, "latency": 0.3, "cost": 2.5,
+    },
+    VideoPriorityMode.BALANCED: {
+        "quality": 1.0, "resolution": 1.0, "aspect_ratio": 0.5, "duration": 0.5,
+        "audio": 0.5, "reliability": 1.0, "latency": 1.0, "cost": 1.0,
+    },
+    VideoPriorityMode.AUTO: {
+        # AUTO defaults to BALANCED's weights today -- a documented,
+        # honest starting point rather than a claim of adaptive
+        # intelligence this codebase doesn't implement yet (see the final
+        # report's "recommended next improvements").
+        "quality": 1.0, "resolution": 1.0, "aspect_ratio": 0.5, "duration": 0.5,
+        "audio": 0.5, "reliability": 1.0, "latency": 1.0, "cost": 1.0,
+    },
+}
+
+_RESOLUTION_ORDER = ["480p", "720p", "768p", "1080p", "1K", "2K", "4K"]
+
+
+@dataclass
+class VideoRequest:
+    generation_type: VideoGenerationType
+    duration: int | None = None
+    resolution: str | None = None
+    aspect_ratio: str | None = None
+    audio: bool = False
+    priority_mode: VideoPriorityMode = VideoPriorityMode.AUTO
+    allow_degraded_config: bool = True
+
+
+@dataclass
+class ResolvedSelection:
+    primary_model_id: str
+    fallback_chain: list[str]
+    validated_params: dict
+    degraded_from_request: bool
+    notes: list[str] = field(default_factory=list)
+
+
+class NoCompatibleModelError(Exception):
+    """No active, circuit-CLOSED model can satisfy the request even after
+    searching for the closest valid configuration. Distinct from an empty
+    catalog (a configuration problem) vs. a genuinely unsatisfiable
+    combination of requirements."""
+
+
+def _loads(text: str | None) -> list:
+    """Parses a stored capability-array JSON column back into a list.
+    Real OpenRouter models (e.g. black-forest-labs/flux-video-edit,
+    heygen/avatar-iv) report several capability fields as a genuine JSON
+    `null`, which json.dumps(None) serializes to the string "null" -- a
+    truthy string that json.loads() correctly parses back to Python None,
+    not []. Every caller here treats "no declared constraint" as "don't
+    gate on this", so None must normalize to [], never propagate as None
+    and blow up a downstream `x in resolutions` check."""
+    if not text:
+        return []
+    value = json.loads(text)
+    return value if value is not None else []
+
+
+def _supports_generation_type(model: VideoModelCatalogEntry, gen_type: VideoGenerationType) -> bool:
+    if gen_type == VideoGenerationType.TEXT_TO_VIDEO:
+        return model.supports_text_to_video
+    if gen_type in (VideoGenerationType.IMAGE_TO_VIDEO, VideoGenerationType.REFERENCE_TO_VIDEO):
+        # Confirmed by OpenRouter's own API docs (InputReference schema):
+        # image references are honored by every provider.
+        return model.supports_image_reference
+    frame_images = _loads(model.supported_frame_images_json)
+    if gen_type == VideoGenerationType.FIRST_FRAME:
+        return "first_frame" in frame_images
+    if gen_type == VideoGenerationType.LAST_FRAME:
+        return "last_frame" in frame_images
+    if gen_type == VideoGenerationType.FIRST_LAST_FRAME:
+        return "first_frame" in frame_images and "last_frame" in frame_images
+    return False
+
+
+def passes_hard_gate(model: VideoModelCatalogEntry, request: VideoRequest) -> bool:
+    """The capability filter -- section 6's "NEVER fallback to a model that
+    does not support the requested duration/resolution/aspect
+    ratio/input type/frame control/audio/other required capability"."""
+    if not model.is_active:
+        return False
+    if model.circuit_state == CircuitState.OPEN:
+        return False
+    if not _supports_generation_type(model, request.generation_type):
+        return False
+    if request.resolution:
+        resolutions = _loads(model.supported_resolutions_json)
+        if resolutions and request.resolution not in resolutions:
+            return False
+    if request.aspect_ratio:
+        ratios = _loads(model.supported_aspect_ratios_json)
+        if ratios and request.aspect_ratio not in ratios:
+            return False
+    if request.duration:
+        durations = _loads(model.supported_durations_json)
+        if durations and request.duration not in durations:
+            return False
+    if request.audio and not model.supports_audio:
+        return False
+    return True
+
+
+def _reliability_score(model: VideoModelCatalogEntry) -> float:
+    total = model.success_count + model.failure_count
+    if total == 0:
+        return 0.7  # unproven model: neither penalized nor favored
+    return model.success_count / total
+
+
+def _latency_score(model: VideoModelCatalogEntry) -> float:
+    latencies = _loads(model.recent_latencies_ms_json)
+    if not latencies:
+        return 0.5
+    avg_ms = sum(latencies) / len(latencies)
+    # Normalize: <=10s -> 1.0, >=180s -> 0.0, linear between.
+    return max(0.0, min(1.0, 1.0 - (avg_ms - 10_000) / 170_000))
+
+
+def p95_latency_ms(model: VideoModelCatalogEntry) -> float | None:
+    latencies = sorted(_loads(model.recent_latencies_ms_json))
+    if not latencies:
+        return None
+    idx = max(0, int(round(0.95 * (len(latencies) - 1))))
+    return float(latencies[idx])
+
+
+def _estimate_cost(model: VideoModelCatalogEntry, request: VideoRequest) -> float:
+    """A relative cost estimate for ranking purposes, not a billing
+    quote -- pricing_skus shapes vary per provider (per-second, per-token,
+    per-image, resolution-tiered), so this picks whichever numeric SKU
+    best matches the requested resolution, falling back to the cheapest
+    numeric SKU on the model. Good enough to rank "roughly cheaper than
+    X"; the actual charge always comes from OpenRouter's own `usage.cost`
+    on the completed job, which is what VideoJob.cost_actual stores."""
+    pricing = json.loads(model.pricing_skus_json) if model.pricing_skus_json else {}
+    numeric_skus = {k: float(v) for k, v in pricing.items() if _is_number(v)}
+    if not numeric_skus:
+        return 0.0
+    duration = request.duration or 5
+    resolution = (request.resolution or "").lower()
+    if resolution:
+        matching = {k: v for k, v in numeric_skus.items() if resolution in k.lower()}
+        if matching:
+            return round(min(matching.values()) * duration, 4)
+    return round(min(numeric_skus.values()) * duration, 4)
+
+
+def _is_number(v) -> bool:
+    try:
+        float(v)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _cost_score(model: VideoModelCatalogEntry, request: VideoRequest, max_cost: float) -> float:
+    if max_cost <= 0:
+        return 1.0
+    cost = _estimate_cost(model, request)
+    return max(0.0, 1.0 - cost / max_cost)
+
+
+def _resolution_match_score(model: VideoModelCatalogEntry, request: VideoRequest) -> float:
+    if not request.resolution:
+        return 0.5
+    resolutions = _loads(model.supported_resolutions_json)
+    if request.resolution in resolutions:
+        return 1.0
+    return 0.3
+
+
+def _duration_match_score(model: VideoModelCatalogEntry, request: VideoRequest) -> float:
+    if not request.duration:
+        return 0.5
+    durations = _loads(model.supported_durations_json)
+    if not durations:
+        return 0.5
+    if request.duration in durations:
+        return 1.0
+    closest = min(durations, key=lambda d: abs(d - request.duration))
+    diff = abs(closest - request.duration)
+    return max(0.0, 1.0 - diff / max(request.duration, 1))
+
+
+def _aspect_ratio_match_score(model: VideoModelCatalogEntry, request: VideoRequest) -> float:
+    if not request.aspect_ratio:
+        return 0.5
+    ratios = _loads(model.supported_aspect_ratios_json)
+    return 1.0 if request.aspect_ratio in ratios else 0.2
+
+
+def _audio_match_score(model: VideoModelCatalogEntry, request: VideoRequest) -> float:
+    if not request.audio:
+        return 1.0
+    return 1.0 if model.supports_audio else 0.0
+
+
+def score_model(
+    model: VideoModelCatalogEntry, request: VideoRequest, candidates: list[VideoModelCatalogEntry]
+) -> float:
+    """routing_score = weighted sum of normalized [0,1] component scores.
+    See module docstring for the two-phase gate-then-score design and
+    _WEIGHTS for the per-priority-mode weight vectors."""
+    weights = _WEIGHTS[request.priority_mode]
+    max_cost = max((_estimate_cost(m, request) for m in candidates), default=0.0)
+    return (
+        weights["quality"] * model.quality_tier_score
+        + weights["resolution"] * _resolution_match_score(model, request)
+        + weights["aspect_ratio"] * _aspect_ratio_match_score(model, request)
+        + weights["duration"] * _duration_match_score(model, request)
+        + weights["audio"] * _audio_match_score(model, request)
+        + weights["reliability"] * _reliability_score(model)
+        + weights["latency"] * _latency_score(model)
+        + weights["cost"] * _cost_score(model, request, max_cost)
+    )
+
+
+def _split_free_first(candidates: list[VideoModelCatalogEntry]) -> list[VideoModelCatalogEntry]:
+    free = [m for m in candidates if m.is_free]
+    return free if free else candidates
+
+
+def _closest_valid_config(
+    models: list[VideoModelCatalogEntry], request: VideoRequest
+) -> tuple[VideoRequest, list[str]] | None:
+    """Section 6's "automatically determine the closest valid
+    configuration" -- tries, in order: exact request; drop audio; degrade
+    resolution one step at a time; widen to nearest supported duration
+    across the whole catalog. Returns (adjusted_request, notes) for the
+    first configuration at least one active model satisfies, or None."""
+    notes: list[str] = []
+    candidate_request = request
+
+    def any_model_matches(req: VideoRequest) -> bool:
+        return any(passes_hard_gate(m, req) for m in models)
+
+    if any_model_matches(candidate_request):
+        return candidate_request, notes
+
+    if candidate_request.audio:
+        without_audio = VideoRequest(**{**candidate_request.__dict__, "audio": False})
+        if any_model_matches(without_audio):
+            notes.append("Audio unavailable for the requested configuration -- disabled.")
+            return without_audio, notes
+        candidate_request = without_audio
+
+    if candidate_request.resolution in _RESOLUTION_ORDER:
+        start = _RESOLUTION_ORDER.index(candidate_request.resolution)
+        for lower in reversed(_RESOLUTION_ORDER[:start]):
+            degraded = VideoRequest(**{**candidate_request.__dict__, "resolution": lower})
+            if any_model_matches(degraded):
+                notes.append(f"{candidate_request.resolution} unavailable -- using {lower} instead.")
+                return degraded, notes
+
+    if candidate_request.duration:
+        all_durations = sorted({d for m in models for d in _loads(m.supported_durations_json)})
+        if all_durations:
+            nearest = min(all_durations, key=lambda d: abs(d - candidate_request.duration))
+            widened = VideoRequest(**{**candidate_request.__dict__, "duration": nearest})
+            if any_model_matches(widened):
+                notes.append(
+                    f"{candidate_request.duration}s unavailable -- using nearest supported duration ({nearest}s)."
+                )
+                return widened, notes
+
+    return None
+
+
+def select_best_model(
+    catalog: list[VideoModelCatalogEntry], request: VideoRequest
+) -> ResolvedSelection:
+    """The section-25 select_best_model(request) entry point. Never
+    silently submits an invalid request (section 6): if the exact request
+    can't be satisfied, resolves the closest valid configuration first (or
+    raises NoCompatibleModelError if allow_degraded_config=False or
+    nothing works at all)."""
+    active = [m for m in catalog if m.is_active and m.circuit_state != CircuitState.OPEN]
+    if not active:
+        raise NoCompatibleModelError("No active video models are currently available")
+
+    pool = _split_free_first(active) if request.priority_mode == VideoPriorityMode.FREE_FIRST else active
+
+    exact_matches = [m for m in pool if passes_hard_gate(m, request)]
+    notes: list[str] = []
+    effective_request = request
+    if not exact_matches:
+        if not request.allow_degraded_config:
+            raise NoCompatibleModelError(
+                "No model supports the exact requested configuration and degradation is disabled"
+            )
+        resolved = _closest_valid_config(pool, request)
+        if resolved is None:
+            raise NoCompatibleModelError(
+                "No available model can satisfy this request even with degraded parameters"
+            )
+        effective_request, notes = resolved
+        exact_matches = [m for m in pool if passes_hard_gate(m, effective_request)]
+
+    ranked = sorted(exact_matches, key=lambda m: score_model(m, effective_request, exact_matches), reverse=True)
+    chain = [m.model_id for m in ranked]
+
+    validated_params = {
+        "generation_type": effective_request.generation_type.value,
+        "duration": effective_request.duration,
+        "resolution": effective_request.resolution,
+        "aspect_ratio": effective_request.aspect_ratio,
+        "audio": effective_request.audio,
+    }
+    logger.info(
+        "video_model_selected",
+        primary_model=chain[0],
+        fallback_count=len(chain) - 1,
+        priority_mode=request.priority_mode.value,
+        degraded=bool(notes),
+    )
+    return ResolvedSelection(
+        primary_model_id=chain[0],
+        fallback_chain=chain[1:],
+        validated_params=validated_params,
+        degraded_from_request=bool(notes),
+        notes=notes,
+    )

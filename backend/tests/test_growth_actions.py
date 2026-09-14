@@ -8,7 +8,6 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app.modules.analytics import service as analytics_service
 from app.modules.analytics.models import GrowthAction
 
 

@@ -6,7 +6,8 @@ YouTube-scope consent screen's verification status)."""
 import pytest
 
 from app.core.errors import UnauthorizedError
-from app.modules.auth import google_oauth, service as auth_service
+from app.modules.auth import google_oauth
+from app.modules.auth import service as auth_service
 from app.modules.users.models import User, UserRole
 
 

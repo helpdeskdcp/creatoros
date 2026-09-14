@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.text import extract_keywords
-from app.modules.experiments.models import CreatorLearningSignal, Experiment, ExperimentVariant
+from app.modules.experiments.models import CreatorLearningSignal, Experiment
 
 _MIN_TOTAL_FOR_CONTEXT = 2  # don't surface a signal from a single coin-flip experiment
 

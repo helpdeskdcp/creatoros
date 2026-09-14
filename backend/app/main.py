@@ -46,6 +46,23 @@ def create_app() -> FastAPI:
     _register_routers(app, settings)
     _register_observability(app)
 
+    @app.on_event("startup")
+    async def _refresh_video_catalog_on_startup() -> None:
+        # Section 20: discover the live OpenRouter video catalog at
+        # startup, not just on the 30-minute beat schedule -- so a fresh
+        # deployment has real model data before the first user request
+        # instead of an empty table. Never fails app boot: an unreachable
+        # OpenRouter at startup just means an empty/stale catalog until
+        # the next successful refresh (beat, or the next restart).
+        from app.db.session import AsyncSessionLocal
+        from app.video.catalog import refresh_catalog
+
+        try:
+            async with AsyncSessionLocal() as db:
+                await refresh_catalog(db, settings)
+        except Exception as exc:  # noqa: BLE001 -- startup must never crash on this
+            logger.warning("video_catalog_startup_refresh_failed", error=str(exc))
+
     return app
 
 
@@ -78,6 +95,7 @@ def _register_routers(app: FastAPI, settings) -> None:
     from app.modules.topics.router import router as topics_router
     from app.modules.trends.router import router as trends_router
     from app.modules.users.router import router as users_router
+    from app.modules.video_generation.router import router as video_generation_router
     from app.modules.video_updates.router import router as video_updates_router
     from app.modules.videos.router import router as videos_router
 
@@ -122,6 +140,9 @@ def _register_routers(app: FastAPI, settings) -> None:
     app.include_router(settings_router, prefix=f"{prefix}/settings", tags=["settings"])
     app.include_router(billing_router, prefix=f"{prefix}/billing", tags=["billing"])
     app.include_router(ai_chat_router, prefix=f"{prefix}/ai", tags=["ai"])
+    app.include_router(
+        video_generation_router, prefix=f"{prefix}/video", tags=["video-generation"]
+    )
 
 
 def _register_observability(app: FastAPI) -> None:

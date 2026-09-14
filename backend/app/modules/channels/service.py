@@ -13,11 +13,11 @@ from app.core.errors import ConflictError, NotFoundError, UnauthorizedError
 from app.core.logging import get_logger
 from app.core.security import create_jwt, decode_jwt
 from app.core.timeutils import ensure_aware
+from app.modules.audit import service as audit_service
 from app.modules.billing.entitlement import enforce_limit
 from app.modules.channels.models import Channel, SyncStatus
 from app.modules.channels.providers import get_youtube_provider
 from app.modules.channels.providers.base import YouTubeProviderError
-from app.modules.audit import service as audit_service
 from app.modules.notifications.models import NotificationChannel, NotificationEvent
 from app.modules.notifications.service import notify
 from app.modules.videos.models import Video, VideoFormat, VideoMetricSnapshot

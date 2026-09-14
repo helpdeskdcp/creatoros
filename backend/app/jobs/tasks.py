@@ -554,3 +554,61 @@ def detect_performance_anomalies_task():
         return result
 
     return _run(_do())
+
+
+@shared_task(bind=True, max_retries=2, default_retry_delay=30)
+def submit_video_job_task(self, job_id: str):
+    """Submits (or resubmits, for a fallback/retry) one VideoJob's current
+    selected_model_id to OpenRouter. Fast (submission is a quick 202
+    response, not the generation itself) -- the actual wait happens in
+    poll_video_jobs_task. Celery's own retry only covers a crash of this
+    task itself; model-level fallback/backoff is handled inside
+    service.submit_attempt, which always leaves the job in a well-defined
+    state (SUBMITTED/RETRYING/FAILED) even if this task never runs again."""
+    async def _do():
+        async with WorkerSessionLocal() as db:
+            from app.modules.video_generation.models import VideoJob
+            from app.modules.video_generation.service import submit_attempt
+
+            job = await db.get(VideoJob, uuid.UUID(job_id))
+            if job is None:
+                return {"error": "job not found"}
+            await submit_attempt(db, job)
+            return {"status": job.status.value}
+
+    return _run(_do())
+
+
+@shared_task
+def poll_video_jobs_task():
+    """Beat-scheduled sweep (see celery_app.py, every 30s): advances every
+    VideoJob currently SUBMITTED/PROCESSING (polls OpenRouter, downloads +
+    QCs + stores on completion) or RETRYING with a due next_retry_at
+    (resubmits to the next fallback model). Never blocks a web request --
+    this is the only place that waits on OpenRouter's async video jobs."""
+    async def _do():
+        async with _tracked_job("poll_video_jobs_task") as result:
+            async with WorkerSessionLocal() as db:
+                from app.modules.video_generation.service import poll_and_progress_jobs
+
+                result["value"] = await poll_and_progress_jobs(db)
+        return result["value"]
+
+    return _run(_do())
+
+
+@shared_task
+def refresh_video_model_catalog_task():
+    """Live model discovery (section 20): re-fetches GET /videos/models
+    and reconciles against video_model_catalog -- new models appear with
+    zero code changes, models that stopped appearing are marked inactive
+    (never deleted), changed capabilities are updated in place."""
+    async def _do():
+        async with _tracked_job("refresh_video_model_catalog_task") as result:
+            async with WorkerSessionLocal() as db:
+                from app.video.catalog import refresh_catalog
+
+                result["value"] = await refresh_catalog(db)
+        return result["value"]
+
+    return _run(_do())

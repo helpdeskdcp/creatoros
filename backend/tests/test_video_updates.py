@@ -14,10 +14,10 @@ from app.core.crypto import encrypt
 from app.core.errors import ConflictError, NotFoundError
 from app.modules.channels.models import Channel, SyncStatus
 from app.modules.channels.providers.mock import MockYouTubeProvider
+from app.modules.users.models import User, UserRole
 from app.modules.video_updates import service as video_updates_service
 from app.modules.video_updates.models import VideoUpdateField, VideoUpdateStatus
 from app.modules.videos.models import Video
-from app.modules.users.models import User, UserRole
 
 
 async def _make_user(db_session, email: str) -> User:

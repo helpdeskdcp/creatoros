@@ -1,0 +1,225 @@
+"""Live OpenRouter video-model catalog discovery.
+
+The live API (GET /videos/models) is the ONLY source of truth for what a
+model supports -- this module never hard-codes "model X supports Y". It
+fetches the real catalog, normalizes it into VideoModelCatalogEntry rows,
+and diffs against what's already stored: new models are added, models that
+stopped appearing are marked inactive (never deleted -- historical VideoJob
+rows must keep a resolvable model name), and changed capabilities are
+updated in place. Call refresh_catalog() at startup and on a schedule
+(see app.jobs.tasks.refresh_video_model_catalog_task, every 30 min).
+"""
+import json
+from datetime import UTC, datetime
+
+import httpx
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.ai.providers.base import AIProviderUnavailableError
+from app.core.config import Settings, get_settings
+from app.core.logging import get_logger
+from app.video.models import CircuitState, VideoModelCatalogEntry
+
+logger = get_logger("video.catalog")
+
+_TIMEOUT_S = 30.0
+
+# A model whose description contains any of these phrases is understood to
+# be image/video-input-only (no meaningful text-to-video path) -- inferred
+# from the live catalog's free-text `description` field, since OpenRouter
+# exposes no explicit boolean for this. Kept short and conservative: a
+# false negative here (treating a text-capable model as image-only) just
+# means it's under-routed for text_to_video requests, never mis-routed
+# into an invalid submission -- the live API call is still the final gate.
+_IMAGE_ONLY_PHRASES = (
+    "image-to-video model", "animates a single photo",
+    "video editing model", "video-editing model", "upscal",
+)
+
+# Maintained quality heuristic -- NOT sourced from OpenRouter, which
+# exposes no quality signal. Documented here so routing decisions can be
+# explained honestly rather than presented as API-confirmed fact. Any
+# model not listed falls back to _DEFAULT_QUALITY_SCORE, so a newly
+# discovered model is never unroutable while this table catches up.
+_DEFAULT_QUALITY_SCORE = 0.6
+QUALITY_TIERS: dict[str, float] = {
+    "google/veo-3.1": 1.0,
+    "google/veo-3.1-fast": 0.9,
+    "google/veo-3.1-lite": 0.8,
+    "openai/sora-2-pro": 1.0,
+    "kwaivgi/kling-v3.0-pro": 0.9,
+    "kwaivgi/kling-v3.0-std": 0.78,
+    "kwaivgi/kling-video-o1": 0.82,
+    "bytedance/seedance-2.5": 0.88,
+    "bytedance/seedance-2.0": 0.85,
+    "bytedance/seedance-2.0-mini": 0.7,
+    "bytedance/seedance-2.0-fast": 0.72,
+    "bytedance/seedance-1-5-pro": 0.8,
+    "alibaba/wan-3.0-prime": 0.85,
+    "alibaba/wan-3.0": 0.75,
+    "alibaba/wan-2.7": 0.7,
+    "alibaba/wan-2.6": 0.65,
+    "alibaba/happyhorse-1.1": 0.68,
+    "alibaba/happyhorse-1.0": 0.63,
+    "minimax/hailuo-3": 0.82,
+    "minimax/hailuo-3-max": 0.86,
+    "minimax/hailuo-2.3": 0.68,
+    "runway/gen-4.5": 0.8,
+    "runway/aleph-2": 0.72,
+    "x-ai/grok-imagine-video-1.5": 0.75,
+    "x-ai/grok-imagine-video": 0.68,
+    "heygen/avatar-iv": 0.7,
+}
+
+
+class CatalogFetchError(Exception):
+    """The live GET /videos/models call itself failed (network/auth/5xx).
+    Distinct from a parsing problem with one model entry, which is skipped
+    rather than failing the whole refresh."""
+
+
+async def fetch_raw_catalog(settings: Settings) -> list[dict]:
+    if not settings.openrouter_api_key:
+        raise AIProviderUnavailableError("OPENROUTER_API_KEY is not configured")
+    url = f"{settings.openrouter_base_url.rstrip('/')}/videos/models"
+    headers = {"Authorization": f"Bearer {settings.openrouter_api_key}"}
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT_S) as client:
+            resp = await client.get(url, headers=headers)
+    except httpx.TransportError as exc:
+        raise CatalogFetchError(f"OpenRouter video catalog endpoint unreachable: {url}") from exc
+    if resp.status_code != 200:
+        # Never include resp.text raw -- defense in depth against an
+        # upstream error body ever echoing the Authorization header back,
+        # exactly like app.ai.providers.openai_compat's redaction policy.
+        raise CatalogFetchError(f"GET /videos/models returned HTTP {resp.status_code}")
+    body = resp.json()
+    return body.get("data", [])
+
+
+def _infer_text_to_video(description: str | None) -> bool:
+    if not description:
+        return True
+    lowered = description.lower()
+    return not any(phrase in lowered for phrase in _IMAGE_ONLY_PHRASES)
+
+
+def _is_free(pricing_skus: dict) -> bool:
+    if not pricing_skus:
+        return False
+    try:
+        return all(float(v) == 0.0 for v in pricing_skus.values())
+    except (TypeError, ValueError):
+        return False
+
+
+def normalize_model(raw: dict) -> dict:
+    """Pure function: raw OpenRouter catalog entry -> normalized fields
+    matching VideoModelCatalogEntry's columns. Separated from the DB layer
+    so capability-inference logic is unit-testable without a database."""
+    model_id = raw["id"]
+    provider = model_id.split("/", 1)[0] if "/" in model_id else "unknown"
+    pricing_skus = raw.get("pricing_skus") or {}
+    description = raw.get("description")
+    return {
+        "model_id": model_id,
+        "name": raw.get("name") or model_id,
+        "provider": provider,
+        "description": description,
+        "supported_resolutions_json": json.dumps(raw.get("supported_resolutions")),
+        "supported_aspect_ratios_json": json.dumps(raw.get("supported_aspect_ratios")),
+        "supported_durations_json": json.dumps(raw.get("supported_durations")),
+        "supported_frame_images_json": json.dumps(raw.get("supported_frame_images")),
+        "supports_audio": bool(raw.get("generate_audio")),
+        # Per OpenRouter's InputReference schema docs: image references are
+        # accepted by every provider -- not a per-model inference.
+        "supports_image_reference": True,
+        "supports_text_to_video": _infer_text_to_video(description),
+        "pricing_skus_json": json.dumps(pricing_skus),
+        "is_free": _is_free(pricing_skus),
+        "quality_tier_score": QUALITY_TIERS.get(model_id, _DEFAULT_QUALITY_SCORE),
+    }
+
+
+async def refresh_catalog(db: AsyncSession, settings: Settings | None = None) -> dict:
+    """Fetches the live catalog and reconciles it against the DB. Returns a
+    summary dict {added, updated, deactivated, total_active} for logging/
+    the admin dashboard -- never raises for a single bad model entry
+    (skipped + logged), only for a total fetch failure."""
+    settings = settings or get_settings()
+    raw_models = await fetch_raw_catalog(settings)
+    now = datetime.now(UTC)
+
+    existing_rows = (await db.scalars(select(VideoModelCatalogEntry))).all()
+    existing_by_id = {row.model_id: row for row in existing_rows}
+    seen_ids: set[str] = set()
+
+    added = 0
+    updated = 0
+    for raw in raw_models:
+        try:
+            normalized = normalize_model(raw)
+        except (KeyError, TypeError) as exc:
+            logger.warning("video_catalog_entry_skipped", error=str(exc), raw_id=raw.get("id"))
+            continue
+        model_id = normalized["model_id"]
+        seen_ids.add(model_id)
+        row = existing_by_id.get(model_id)
+        if row is None:
+            row = VideoModelCatalogEntry(**normalized, is_active=True, last_checked_at=now)
+            db.add(row)
+            added += 1
+        else:
+            for field, value in normalized.items():
+                setattr(row, field, value)
+            row.is_active = True
+            row.last_checked_at = now
+            updated += 1
+
+    deactivated = 0
+    for model_id, row in existing_by_id.items():
+        if model_id not in seen_ids and row.is_active:
+            row.is_active = False
+            deactivated += 1
+
+    await db.commit()
+    summary = {
+        "added": added,
+        "updated": updated,
+        "deactivated": deactivated,
+        "total_active": len(seen_ids),
+    }
+    logger.info("video_catalog_refreshed", **summary)
+    return summary
+
+
+async def list_active_models(db: AsyncSession) -> list[VideoModelCatalogEntry]:
+    return list(
+        (
+            await db.scalars(
+                select(VideoModelCatalogEntry).where(VideoModelCatalogEntry.is_active.is_(True))
+            )
+        ).all()
+    )
+
+
+def record_success(row: VideoModelCatalogEntry, latency_ms: int, *, max_recent: int = 50) -> None:
+    row.success_count += 1
+    row.consecutive_failures = 0
+    row.last_success_at = datetime.now(UTC)
+    if row.circuit_state == CircuitState.HALF_OPEN:
+        row.circuit_state = CircuitState.CLOSED
+        row.circuit_opened_at = None
+    recent = json.loads(row.recent_latencies_ms_json) if row.recent_latencies_ms_json else []
+    recent.append(latency_ms)
+    row.recent_latencies_ms_json = json.dumps(recent[-max_recent:])
+
+
+def record_failure(row: VideoModelCatalogEntry, *, failure_threshold: int = 5) -> None:
+    row.failure_count += 1
+    row.consecutive_failures += 1
+    row.last_failure_at = datetime.now(UTC)
+    if row.circuit_state == CircuitState.HALF_OPEN or row.consecutive_failures >= failure_threshold:
+        row.circuit_state = CircuitState.OPEN
+        row.circuit_opened_at = datetime.now(UTC)

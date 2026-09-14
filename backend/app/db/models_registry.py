@@ -34,6 +34,7 @@ from app.modules.experiments.models import (  # noqa: F401
 from app.modules.hooks.models import Hook  # noqa: F401
 from app.modules.media.models import MediaAsset  # noqa: F401
 from app.modules.notifications.models import Notification  # noqa: F401
+from app.modules.predictions.models import PredictionRecord  # noqa: F401
 from app.modules.publishing.models import (  # noqa: F401
     PublishingAttempt,
     PublishingRule,
@@ -50,14 +51,18 @@ from app.modules.shorts.models import (  # noqa: F401
     TranscriptSegment,
     VideoProcessingJob,
 )
+from app.modules.thumbnail_vision.models import ThumbnailAnalysis  # noqa: F401
 from app.modules.thumbnails.models import ThumbnailBrief  # noqa: F401
 from app.modules.titles.models import Title  # noqa: F401
 from app.modules.topics.models import Opportunity, Topic  # noqa: F401
 from app.modules.trends.models import Trend  # noqa: F401
-from app.modules.predictions.models import PredictionRecord  # noqa: F401
-from app.modules.thumbnail_vision.models import ThumbnailAnalysis  # noqa: F401
 from app.modules.users.models import User, UserSession  # noqa: F401
+from app.modules.video_generation.models import (  # noqa: F401
+    VideoGenerationAttempt,
+    VideoJob,
+)
 from app.modules.video_updates.models import VideoUpdateProposal  # noqa: F401
 from app.modules.videos.models import Video, VideoMetricSnapshot  # noqa: F401
+from app.video.models import VideoModelCatalogEntry  # noqa: F401
 
 __all__ = ["Base"]

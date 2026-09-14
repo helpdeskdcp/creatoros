@@ -6,7 +6,6 @@ Recording a metric must never break the actual AI call it describes: any
 failure here is logged and swallowed, not raised.
 """
 import statistics
-import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select

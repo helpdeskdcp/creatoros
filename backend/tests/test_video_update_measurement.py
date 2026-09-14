@@ -6,17 +6,17 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 
 from app.core.crypto import encrypt
 from app.core.errors import ConflictError
 from app.modules.channels.models import Channel, SyncStatus
 from app.modules.channels.providers.mock import MockYouTubeProvider
 from app.modules.experiments.models import CreatorLearningSignal
+from app.modules.users.models import User, UserRole
 from app.modules.video_updates import service as vu
 from app.modules.video_updates.models import VideoUpdateField, VideoUpdateImpact
 from app.modules.videos.models import Video, VideoMetricSnapshot
-from app.modules.users.models import User, UserRole
-from sqlalchemy import select
 
 
 async def _make_user(db_session, email: str) -> User:

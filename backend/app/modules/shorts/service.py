@@ -27,7 +27,6 @@ from app.core.logging import get_logger
 from app.modules.media.models import MediaAsset, MediaPurpose
 from app.modules.media.service import local_path_for, save_local_file
 from app.modules.shorts.generation import generate_short_metadata
-from app.modules.shorts.moment_detection import TranscriptSegmentLike, rank_candidates
 from app.modules.shorts.models import (
     ShortCandidate,
     ShortCandidateStatus,
@@ -36,6 +35,7 @@ from app.modules.shorts.models import (
     VideoJobStatus,
     VideoProcessingJob,
 )
+from app.modules.shorts.moment_detection import TranscriptSegmentLike, rank_candidates
 from app.modules.shorts.providers import get_transcription_provider
 from app.modules.shorts.providers.base import TranscriptionProviderError
 from app.modules.shorts.subtitles import generate_srt

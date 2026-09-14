@@ -2,7 +2,21 @@
 app.jobs.tasks — import that module (not this one) to get task functions."""
 from celery import Celery
 
+import app.db.models_registry  # noqa: F401
 from app.core.config import get_settings
+
+# The models_registry import above populates Base.metadata / SQLAlchemy's
+# mapper registry with EVERY ORM model before any task can run. Without
+# it, a worker process that happens to run a task touching one table
+# (e.g. jobs, which has a real FK to users) before anything has imported
+# the `User` class crashes with NoReferencedTableError at flush time --
+# SQLAlchemy resolves FK target tables lazily, by name, against whatever
+# has actually been imported into this process. Previously nothing in the
+# worker bootstrap imported this (only alembic and the test suite did),
+# so it depended on which task happened to fire first and what it
+# happened to transitively import -- a real incident, not hypothetical: a
+# beat task with a short interval firing before any other task had
+# incidentally imported User reproduced this exact crash in production.
 
 settings = get_settings()
 
@@ -62,5 +76,13 @@ celery_app.conf.beat_schedule = {
     "detect-performance-anomalies": {
         "task": "app.jobs.tasks.detect_performance_anomalies_task",
         "schedule": 3600.0 * 3,
+    },
+    "poll-video-jobs": {
+        "task": "app.jobs.tasks.poll_video_jobs_task",
+        "schedule": 30.0,
+    },
+    "refresh-video-model-catalog": {
+        "task": "app.jobs.tasks.refresh_video_model_catalog_task",
+        "schedule": 1800.0,
     },
 }
