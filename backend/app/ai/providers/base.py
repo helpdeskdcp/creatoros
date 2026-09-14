@@ -53,6 +53,14 @@ class AIQueueBusyError(AIProviderError):
     the bounded-concurrency wrapper around a local provider)."""
 
 
+class RateLimitedError(AIProviderError):
+    """The provider responded with HTTP 429 (its own rate limit, not this
+    app's local concurrency gate). Surfaces to callers as AI_RATE_LIMITED.
+    Treated like AIProviderUnavailableError for retry purposes -- resending
+    the identical request immediately won't succeed, so the orchestrator
+    moves straight to a fallback provider (if any) instead of retrying."""
+
+
 class AIProvider(ABC):
     name: str
 

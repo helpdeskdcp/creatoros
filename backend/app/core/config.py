@@ -79,6 +79,19 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o-mini"
+    # OpenRouter: an OpenAI-compatible hosted API that proxies many models
+    # (including several free-tier ones) behind one key -- lets this
+    # CPU-only VPS use larger/alternative models without a GPU and without
+    # depending solely on the paid OpenAI account above. Selectable as
+    # AI_PRIMARY_PROVIDER or AI_FALLBACK_PROVIDER, or per-request via
+    # POST /api/v1/ai/chat's "provider" field -- never assumed by default.
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    # OpenRouter's free-tier model catalog changes over time -- verify the
+    # exact slug at https://openrouter.ai/models?max_price=0 before relying
+    # on it, and override here (or per-request) rather than hardcoding a
+    # model name in application code.
+    openrouter_model: str = "openrouter/free"
     # Bounds simultaneous in-flight Ollama requests on this CPU-only, single-
     # model-loaded (OLLAMA_NUM_PARALLEL=1) host so a burst of requests queues
     # instead of all starving each other for CPU. See app/ai/concurrency.py.
@@ -133,6 +146,10 @@ class Settings(BaseSettings):
     @property
     def openai_configured(self) -> bool:
         return bool(self.openai_api_key)
+
+    @property
+    def openrouter_configured(self) -> bool:
+        return bool(self.openrouter_api_key)
 
     @property
     def s3_configured(self) -> bool:

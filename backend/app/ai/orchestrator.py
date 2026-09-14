@@ -20,6 +20,7 @@ from app.ai.providers.base import (
     AIProviderUnavailableError,
     AIQueueBusyError,
     ModelNotAvailableError,
+    RateLimitedError,
 )
 from app.ai.router import AIMode, ModelTier, default_tier_for_mode, resolve_ollama_model
 from app.core.config import Settings, get_settings
@@ -37,7 +38,18 @@ _ERROR_CODES: dict[type[Exception], str] = {
     ModelNotAvailableError: "MODEL_NOT_AVAILABLE",
     AIGenerationTimeoutError: "AI_GENERATION_TIMEOUT",
     AIQueueBusyError: "AI_QUEUE_BUSY",
+    RateLimitedError: "AI_RATE_LIMITED",
 }
+
+# Failing with one of these means resending the identical request to the
+# SAME provider right away cannot succeed -- move straight to the fallback
+# provider (if any) instead of burning retry budget on a doomed resend.
+_NON_RETRYABLE_ON_SAME_PROVIDER = (
+    AIProviderUnavailableError,
+    ModelNotAvailableError,
+    AIQueueBusyError,
+    RateLimitedError,
+)
 
 
 def _error_code_for(exc: Exception | None) -> str:
@@ -61,9 +73,20 @@ class AIOrchestratorError(Exception):
 
 
 class AIOrchestrator:
-    def __init__(self, primary: AIProvider, fallback: AIProvider | None = None):
+    def __init__(
+        self,
+        primary: AIProvider,
+        fallback: AIProvider | None = None,
+        providers: dict[str, AIProvider] | None = None,
+    ):
         self.primary = primary
         self.fallback = fallback
+        # Every provider CreatorOS knows how to build, keyed by name (e.g.
+        # "ollama", "openai", "openrouter") -- lets a caller request one by
+        # name (see generate_text's `provider` param) without constructing a
+        # second orchestrator. Optional/empty for callers (tests, mostly)
+        # that only care about the primary/fallback chain.
+        self.providers = providers or {}
 
     async def generate_structured(
         self,
@@ -144,14 +167,13 @@ class AIOrchestrator:
                         attempt=attempt,
                         error=str(exc),
                     )
-                    # A provider that is unreachable, missing the model, or
-                    # queue-saturated will not fix itself within the same
-                    # request -- move straight to the fallback provider (if
-                    # any) instead of burning the remaining retry budget
-                    # resending an identical doomed request.
-                    if isinstance(
-                        exc, AIProviderUnavailableError | ModelNotAvailableError | AIQueueBusyError
-                    ):
+                    # A provider that is unreachable, missing the model,
+                    # queue-saturated, or rate-limited will not fix itself
+                    # within the same request -- move straight to the
+                    # fallback provider (if any) instead of burning the
+                    # remaining retry budget resending an identical doomed
+                    # request.
+                    if isinstance(exc, _NON_RETRYABLE_ON_SAME_PROVIDER):
                         break
                     messages.append(
                         AIMessage(
@@ -166,6 +188,93 @@ class AIOrchestrator:
         logger.error("ai_generation_failed", task=task, mode=mode.value, error=str(last_error))
         raise AIOrchestratorError(
             f"AI generation for task '{task}' failed on every provider/attempt: {last_error}",
+            code=_error_code_for(last_error),
+        )
+
+    async def generate_text(
+        self,
+        *,
+        task: str,
+        user_prompt: str,
+        system_prompt: str | None = None,
+        mode: AIMode = AIMode.FAST,
+        temperature: float = 0.4,
+        max_tokens: int = 2000,
+        model: str | None = None,
+        provider: str | None = None,
+        max_retries: int = 2,
+    ) -> AICompletionResult:
+        """Free-form chat completion -- no schema, no JSON-mode retry loop.
+        For the general-purpose AI gateway endpoint (POST /ai/chat) and any
+        future caller that wants raw text rather than a validated Pydantic
+        model (that's what generate_structured is for).
+
+        `provider` optionally pins this call to one named provider (e.g.
+        "openrouter") instead of the configured primary/fallback chain --
+        looked up in self.providers, built once in build_orchestrator().
+        Unset (the default) uses primary-then-fallback like
+        generate_structured. `model` overrides whichever provider(s) end up
+        being tried, the same "one-call override" semantics as
+        AIProvider.complete's own `model` parameter.
+        """
+        think = mode is AIMode.DEEP
+        messages: list[AIMessage] = []
+        if system_prompt:
+            messages.append(AIMessage(role="system", content=system_prompt))
+        messages.append(AIMessage(role="user", content=user_prompt))
+
+        if provider is not None:
+            chosen = self.providers.get(provider)
+            if chosen is None:
+                raise AIOrchestratorError(
+                    f"Unknown AI provider '{provider}'", code="AI_PROVIDER_UNAVAILABLE"
+                )
+            candidates = [chosen]
+        else:
+            candidates = [p for p in (self.primary, self.fallback) if p is not None]
+
+        last_error: Exception | None = None
+        for candidate in candidates:
+            model_override = model
+            if model_override is None and candidate.name == "ollama":
+                model_override = resolve_ollama_model(default_tier_for_mode(mode), get_settings())
+            for attempt in range(1, max_retries + 1):
+                try:
+                    result = await candidate.complete(
+                        messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        json_mode=False,
+                        think=think,
+                        model=model_override,
+                    )
+                    logger.info(
+                        "ai_text_generation_succeeded",
+                        task=task,
+                        provider=candidate.name,
+                        model=result.model,
+                        mode=mode.value,
+                        attempt=attempt,
+                        prompt_tokens=result.prompt_tokens,
+                        completion_tokens=result.completion_tokens,
+                    )
+                    return result
+                except AIProviderError as exc:
+                    last_error = exc
+                    logger.warning(
+                        "ai_text_generation_attempt_failed",
+                        task=task,
+                        provider=candidate.name,
+                        mode=mode.value,
+                        attempt=attempt,
+                        error=str(exc),
+                    )
+                    if isinstance(exc, _NON_RETRYABLE_ON_SAME_PROVIDER):
+                        break
+
+        logger.error("ai_text_generation_failed", task=task, mode=mode.value, error=str(last_error))
+        raise AIOrchestratorError(
+            f"AI text generation for task '{task}' failed on every provider/attempt: {last_error}",
             code=_error_code_for(last_error),
         )
 
@@ -198,10 +307,18 @@ def build_orchestrator(settings: Settings | None = None) -> AIOrchestrator:
     providers: dict[str, AIProvider] = {
         "ollama": ollama_provider,
         "openai": OpenAICompatProvider(
-            settings.openai_base_url, settings.openai_api_key, settings.openai_model
+            settings.openai_base_url, settings.openai_api_key, settings.openai_model, name="openai"
+        ),
+        # OpenRouter speaks the same OpenAI-compatible wire format as the
+        # provider above -- same class, different base URL/key/model/name.
+        "openrouter": OpenAICompatProvider(
+            settings.openrouter_base_url,
+            settings.openrouter_api_key,
+            settings.openrouter_model,
+            name="openrouter",
         ),
     }
 
     primary = providers.get(settings.ai_primary_provider, providers["ollama"])
     fallback = providers.get(settings.ai_fallback_provider) if settings.ai_fallback_provider else None
-    return AIOrchestrator(primary=primary, fallback=fallback)
+    return AIOrchestrator(primary=primary, fallback=fallback, providers=providers)

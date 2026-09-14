@@ -50,6 +50,7 @@ def create_app() -> FastAPI:
 
 
 def _register_routers(app: FastAPI, settings) -> None:
+    from app.modules.ai_chat.router import router as ai_chat_router
     from app.modules.analytics.router import router as analytics_router
     from app.modules.audit.router import router as audit_router
     from app.modules.auth.router import router as auth_router
@@ -62,6 +63,7 @@ def _register_routers(app: FastAPI, settings) -> None:
     from app.modules.hooks.router import router as hooks_router
     from app.modules.media.router import router as media_router
     from app.modules.notifications.router import router as notifications_router
+    from app.modules.predictions.router import router as predictions_router
     from app.modules.publishing.router import router as publishing_router
     from app.modules.recommendations.router import router as recommendations_router
     from app.modules.research.router import router as research_router
@@ -70,13 +72,12 @@ def _register_routers(app: FastAPI, settings) -> None:
     from app.modules.seo.router import router as seo_router
     from app.modules.settings.router import router as settings_router
     from app.modules.shorts.router import router as shorts_router
+    from app.modules.thumbnail_vision.router import router as thumbnail_vision_router
     from app.modules.thumbnails.router import router as thumbnails_router
     from app.modules.titles.router import router as titles_router
     from app.modules.topics.router import router as topics_router
     from app.modules.trends.router import router as trends_router
     from app.modules.users.router import router as users_router
-    from app.modules.predictions.router import router as predictions_router
-    from app.modules.thumbnail_vision.router import router as thumbnail_vision_router
     from app.modules.video_updates.router import router as video_updates_router
     from app.modules.videos.router import router as videos_router
 
@@ -120,6 +121,7 @@ def _register_routers(app: FastAPI, settings) -> None:
     app.include_router(distribution_router, prefix=f"{prefix}/distribution", tags=["distribution"])
     app.include_router(settings_router, prefix=f"{prefix}/settings", tags=["settings"])
     app.include_router(billing_router, prefix=f"{prefix}/billing", tags=["billing"])
+    app.include_router(ai_chat_router, prefix=f"{prefix}/ai", tags=["ai"])
 
 
 def _register_observability(app: FastAPI) -> None:
