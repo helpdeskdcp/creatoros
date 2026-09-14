@@ -158,6 +158,32 @@ async def test_invalid_api_key_raises_without_leaking_response_body(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
+# Null content (reasoning models that exhaust max_tokens mid-"thinking")
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_null_content_raises_clean_error_instead_of_crashing(monkeypatch):
+    # Reproduces a real response shape observed live from OpenRouter: a
+    # reasoning-capable model puts its output in `reasoning` and leaves
+    # `content` null when max_tokens runs out before it finishes "thinking".
+    _patch_client(monkeypatch, response=_FakeResponse(
+        200,
+        {
+            "choices": [{
+                "finish_reason": "length",
+                "message": {"role": "assistant", "content": None, "reasoning": "still thinking..."},
+            }],
+            "usage": {"prompt_tokens": 50, "completion_tokens": 700},
+        },
+    ))
+    provider = OpenAICompatProvider("https://openrouter.ai/api/v1", FAKE_KEY, "openrouter/free", name="openrouter")
+
+    with pytest.raises(AIProviderError) as exc_info:
+        await provider.complete([AIMessage(role="user", content="hi")])
+    assert "length" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
 # 5. Timeout
 # ---------------------------------------------------------------------------
 

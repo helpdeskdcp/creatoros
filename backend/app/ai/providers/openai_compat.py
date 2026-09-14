@@ -94,10 +94,27 @@ class OpenAICompatProvider(AIProvider):
             )
 
         body = resp.json()
-        choice = body["choices"][0]["message"]["content"]
+        message = body["choices"][0]["message"]
+        content = message.get("content")
+        if content is None:
+            # Some reasoning-capable models (seen live via OpenRouter's
+            # openrouter/free auto-router landing on a reasoning model) put
+            # their output in a separate `reasoning` field and leave
+            # `content` null when max_tokens runs out mid-"thinking",
+            # before any final answer is written (finish_reason="length").
+            # Never let a None reach the caller as generated text -- that's
+            # a Pydantic ValidationError surfacing as an opaque 500 instead
+            # of an actionable, typed failure.
+            finish_reason = body["choices"][0].get("finish_reason")
+            raise AIProviderError(
+                f"Provider '{self.name}' returned no completion content "
+                f"(finish_reason={finish_reason!r}) -- the model likely "
+                "exhausted max_tokens during internal reasoning before "
+                "producing a final answer; retry with a higher max_tokens"
+            )
         usage = body.get("usage", {})
         return AICompletionResult(
-            text=choice,
+            text=content,
             provider=self.name,
             model=resolved_model,
             prompt_tokens=usage.get("prompt_tokens"),
