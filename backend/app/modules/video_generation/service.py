@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.providers.base import (
     AIProviderError,
     AIProviderUnavailableError,
+    InsufficientCreditsError,
     ModelNotAvailableError,
     PrivacyPolicyViolationError,
     RateLimitedError,
@@ -40,6 +41,7 @@ from app.video.providers.openrouter_video import OpenRouterVideoProvider
 from app.video.qc import run_qc
 from app.video.router import (
     NoCompatibleModelError,
+    NoFreeVideoModelError,
     ResolvedSelection,
     VideoRequest,
     estimate_cost,
@@ -64,6 +66,7 @@ _STUCK_POLL_TIMEOUT_S = 1200  # 20 minutes
 # classification policy as app.ai.orchestrator's _NON_RETRYABLE_ON_SAME_PROVIDER.
 _NON_RETRYABLE_ON_SAME_MODEL = (
     AIProviderUnavailableError, ModelNotAvailableError, RateLimitedError, PrivacyPolicyViolationError,
+    InsufficientCreditsError,
 )
 # A distinct, clean, user-safe error code -- surfaced instead of a raw
 # per-attempt provider message when EVERY model in the fallback chain
@@ -77,6 +80,18 @@ ZDR_POLICY_BLOCKED_MESSAGE = (
     "privacy policy (Zero Data Retention guardrail), which rejected every "
     "compatible model. An administrator can review this at "
     "openrouter.ai/workspaces/default/guardrails."
+)
+# Same collapsing pattern as ZDR_POLICY_BLOCKED above, for the other
+# account-wide (never model-specific) failure mode: insufficient OpenRouter
+# credits. Must never be confused with the ZDR code -- a billing problem is
+# fixed by adding credits, a ZDR problem by an admin reviewing guardrails,
+# and conflating them sends whoever's debugging this to the wrong place.
+BILLING_INSUFFICIENT_CREDITS_ERROR_CODE = "BILLING_INSUFFICIENT_CREDITS"
+BILLING_INSUFFICIENT_CREDITS_MESSAGE = (
+    "Video generation is currently blocked because this OpenRouter account "
+    "has insufficient credits, which every compatible model was rejected "
+    "for. Add credits at openrouter.ai/settings/credits, or retry without "
+    "paid fallback enabled."
 )
 
 
@@ -141,12 +156,22 @@ async def create_video_job(
     audio: bool = False,
     input_references: list[str] | None = None,
     allow_degraded_config: bool = True,
+    allow_paid_fallback: bool = False,
 ) -> VideoJob:
     """Validates the request against the LIVE discovered catalog (never a
     hard-coded model list) and persists a QUEUED VideoJob with its full
     fallback chain already resolved. Raises ValidationError if genuinely
     nothing in the catalog can satisfy the request, even degraded --
-    never creates a job doomed to submit an invalid configuration."""
+    never creates a job doomed to submit an invalid configuration.
+
+    Raises NoFreeVideoModelError (NOT wrapped as ValidationError, NOT
+    caught here) when priority_mode=FREE_FIRST and allow_paid_fallback is
+    False but no free video model can satisfy the request -- the router
+    (app.modules.video_generation.router) catches this specifically to
+    return the {"status": "NO_FREE_VIDEO_MODEL", ...} contract instead of
+    a generic error envelope, and no VideoJob row is created for it (the
+    hard billing guard blocks the request itself, before any job/attempt
+    exists)."""
     settings = get_settings()
     if duration and duration > settings.video_max_duration_seconds:
         raise ValidationError(
@@ -163,9 +188,12 @@ async def create_video_job(
         audio=audio,
         priority_mode=priority_mode,
         allow_degraded_config=allow_degraded_config,
+        allow_paid_fallback=allow_paid_fallback,
     )
     try:
         selection: ResolvedSelection = select_best_model(catalog, request)
+    except NoFreeVideoModelError:
+        raise
     except NoCompatibleModelError as exc:
         raise ValidationError(str(exc)) from exc
 
@@ -179,6 +207,15 @@ async def create_video_job(
         )
         cost_estimate = estimate_cost(primary_row, cost_request)
     await _enforce_daily_cost_limit(db, owner_user_id, settings, additional_cost=cost_estimate or 0.0)
+
+    is_free_route = bool(primary_row is not None and primary_row.is_free)
+    # Only "paid fallback used" when FREE_FIRST was requested AND paid
+    # permission was explicitly granted AND the selection actually ended up
+    # non-free -- distinct from a QUALITY/BALANCED/etc. job, which is also
+    # "not free" but never went through the free-first-then-paid path.
+    paid_fallback_used = bool(
+        priority_mode == VideoPriorityMode.FREE_FIRST and allow_paid_fallback and not is_free_route
+    )
 
     job = VideoJob(
         owner_user_id=owner_user_id,
@@ -197,6 +234,8 @@ async def create_video_job(
         selected_model_id=selection.primary_model_id,
         status=AIVideoJobStatus.QUEUED,
         cost_estimate=cost_estimate,
+        is_free_route=is_free_route,
+        paid_fallback_used=paid_fallback_used,
         resolution=selection.validated_params.get("resolution"),
         aspect_ratio=selection.validated_params.get("aspect_ratio"),
         duration_seconds=selection.validated_params.get("duration"),
@@ -290,6 +329,11 @@ async def submit_attempt(db: AsyncSession, job: VideoJob, settings: Settings | N
         )
         if isinstance(exc, PrivacyPolicyViolationError):
             await _record_zdr_block(db, model_id)
+        elif isinstance(exc, InsufficientCreditsError):
+            # Account-wide billing state, not evidence this model is
+            # unhealthy -- must never penalize its circuit breaker/
+            # reliability score the way a real provider failure would.
+            pass
         else:
             await _record_catalog_outcome(db, model_id, success=False)
         can_retry_same_model = (
@@ -335,6 +379,13 @@ async def _advance_to_next_model_or_fail(
             # error rather than surfacing the last model's raw text.
             job.error = ZDR_POLICY_BLOCKED_MESSAGE
             job.error_code = ZDR_POLICY_BLOCKED_ERROR_CODE
+        elif await _all_attempts_billing_blocked(db, job.id):
+            # Same collapsing pattern, for insufficient credits -- an
+            # account-wide condition, never a per-model one, and must never
+            # be reported as the ZDR code above just because both happen to
+            # fail every model in the chain the same way.
+            job.error = BILLING_INSUFFICIENT_CREDITS_MESSAGE
+            job.error_code = BILLING_INSUFFICIENT_CREDITS_ERROR_CODE
         job.completed_at = datetime.now(UTC)
         await db.commit()
         logger.error(
@@ -389,6 +440,17 @@ async def _all_attempts_zdr_blocked(db: AsyncSession, job_id: uuid.UUID) -> bool
         )
     ).all()
     return bool(attempts) and all(a.error_code == "PrivacyPolicyViolationError" for a in attempts)
+
+
+async def _all_attempts_billing_blocked(db: AsyncSession, job_id: uuid.UUID) -> bool:
+    attempts = (
+        await db.scalars(
+            select(VideoGenerationAttempt).where(
+                VideoGenerationAttempt.video_job_id == job_id, VideoGenerationAttempt.outcome == "failed"
+            )
+        )
+    ).all()
+    return bool(attempts) and all(a.error_code == "InsufficientCreditsError" for a in attempts)
 
 
 async def poll_and_progress_jobs(db: AsyncSession, settings: Settings | None = None) -> dict:

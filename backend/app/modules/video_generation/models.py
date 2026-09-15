@@ -71,6 +71,14 @@ class VideoJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     fallback_chain_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     selected_model_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     provider_job_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    # Billing visibility (UI status FREE/PAID -- the BLOCKED case never
+    # creates a row here at all, see NoFreeVideoModelError): whether the
+    # PRIMARY model selected for this job was genuinely free per the live
+    # catalog, and -- only meaningful when priority_mode=FREE_FIRST --
+    # whether the explicit allow_paid_fallback permission was actually
+    # exercised because no free model could satisfy the request.
+    is_free_route: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    paid_fallback_used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     status: Mapped[AIVideoJobStatus] = mapped_column(
         Enum(AIVideoJobStatus, name="ai_video_job_status"), default=AIVideoJobStatus.QUEUED, nullable=False, index=True

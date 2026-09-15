@@ -12,6 +12,7 @@ from app.ai.providers.base import (
     AIGenerationTimeoutError,
     AIProviderError,
     AIProviderUnavailableError,
+    InsufficientCreditsError,
     ModelNotAvailableError,
     PrivacyPolicyViolationError,
     RateLimitedError,
@@ -189,5 +190,9 @@ class OpenRouterVideoProvider:
         if status_code in (401, 403):
             raise AIProviderError(f"Provider 'openrouter' rejected the video request: HTTP {status_code}")
         if status_code == 402:
-            raise AIProviderError("Insufficient OpenRouter credits for this video request")
+            # Account-wide billing state, never a model/privacy problem --
+            # must stay distinguishable from every other AIProviderError so
+            # it's never mislabeled as a ZDR/guardrail block or a generic
+            # provider failure (see InsufficientCreditsError's docstring).
+            raise InsufficientCreditsError("Insufficient OpenRouter credits for this video request")
         raise AIProviderError(f"OpenRouter video API returned {status_code}")

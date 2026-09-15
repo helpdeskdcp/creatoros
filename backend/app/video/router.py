@@ -43,8 +43,8 @@ _WEIGHTS: dict[VideoPriorityMode, dict[str, float]] = {
     },
     VideoPriorityMode.FREE_FIRST: {
         # Free-vs-paid is enforced as a hard pre-filter (see
-        # _split_free_first), so among the remaining candidates this is
-        # identical to LOW_COST.
+        # _free_video_models / NoFreeVideoModelError in select_best_model),
+        # so among the remaining candidates this is identical to LOW_COST.
         "quality": 0.3, "resolution": 0.5, "aspect_ratio": 0.5, "duration": 0.5,
         "audio": 0.3, "reliability": 0.8, "latency": 0.3, "cost": 2.5,
     },
@@ -74,6 +74,12 @@ class VideoRequest:
     audio: bool = False
     priority_mode: VideoPriorityMode = VideoPriorityMode.AUTO
     allow_degraded_config: bool = True
+    # FREE_FIRST-only: explicit, opt-in permission to use a paid model when
+    # no free video model exists or none can satisfy this request. Defaults
+    # to False -- FREE_FIRST must never silently spend credits (see
+    # NoFreeVideoModelError). Ignored for every other priority mode, which
+    # were already allowed to use paid models by definition.
+    allow_paid_fallback: bool = False
 
 
 @dataclass
@@ -90,6 +96,17 @@ class NoCompatibleModelError(Exception):
     searching for the closest valid configuration. Distinct from an empty
     catalog (a configuration problem) vs. a genuinely unsatisfiable
     combination of requirements."""
+
+
+class NoFreeVideoModelError(NoCompatibleModelError):
+    """FREE_FIRST mode was requested (without allow_paid_fallback) and no
+    genuinely free video-generation model -- confirmed via the live
+    catalog's own pricing_skus, never inferred from free TEXT/image models
+    being available -- can satisfy this request. The caller (see
+    app.modules.video_generation.service.create_video_job) must surface
+    this as the structured {"status": "NO_FREE_VIDEO_MODEL",
+    "requires_credits": true, "paid_fallback_used": false} contract, never
+    silently substitute a paid model."""
 
 
 def _loads(text: str | None) -> list:
@@ -272,9 +289,12 @@ def score_model(
     )
 
 
-def _split_free_first(candidates: list[VideoModelCatalogEntry]) -> list[VideoModelCatalogEntry]:
-    free = [m for m in candidates if m.is_free]
-    return free if free else candidates
+def _free_video_models(candidates: list[VideoModelCatalogEntry]) -> list[VideoModelCatalogEntry]:
+    """Genuinely free per the LIVE video catalog's own pricing_skus (see
+    app.video.catalog._is_free: every pricing_sku is exactly 0) -- never
+    inferred from OpenRouter's free TEXT/chat models existing, which is a
+    completely separate catalog with no bearing on video pricing."""
+    return [m for m in candidates if m.is_free]
 
 
 def _closest_valid_config(
@@ -348,34 +368,35 @@ def _no_compatible_model_message(pool: list[VideoModelCatalogEntry], request: Vi
     return "No available model can satisfy this request even with degraded parameters"
 
 
-def select_best_model(
-    catalog: list[VideoModelCatalogEntry], request: VideoRequest
-) -> ResolvedSelection:
-    """The section-25 select_best_model(request) entry point. Never
-    silently submits an invalid request (section 6): if the exact request
-    can't be satisfied, resolves the closest valid configuration first (or
-    raises NoCompatibleModelError if allow_degraded_config=False or
-    nothing works at all)."""
-    active = [m for m in catalog if m.is_active and m.circuit_state != CircuitState.OPEN]
-    if not active:
-        raise NoCompatibleModelError("No active video models are currently available")
-
-    pool = _split_free_first(active) if request.priority_mode == VideoPriorityMode.FREE_FIRST else active
-
+def _resolve_pool(
+    pool: list[VideoModelCatalogEntry], request: VideoRequest
+) -> tuple[list[VideoModelCatalogEntry], list[str], VideoRequest] | None:
+    """Try to satisfy `request` using only models in `pool`. Returns
+    (exact_matches, notes, effective_request) on success, or None if this
+    pool -- exact or degraded -- cannot satisfy the request at all. Never
+    raises: the caller decides what a failure means for *this* pool (a
+    genuine dead end, vs. "try a wider pool")."""
     exact_matches = [m for m in pool if passes_hard_gate(m, request)]
-    notes: list[str] = []
-    effective_request = request
+    if exact_matches:
+        return exact_matches, [], request
+    if not request.allow_degraded_config:
+        return None
+    resolved = _closest_valid_config(pool, request)
+    if resolved is None:
+        return None
+    effective_request, notes = resolved
+    exact_matches = [m for m in pool if passes_hard_gate(m, effective_request)]
     if not exact_matches:
-        if not request.allow_degraded_config:
-            raise NoCompatibleModelError(
-                "No model supports the exact requested configuration and degradation is disabled"
-            )
-        resolved = _closest_valid_config(pool, request)
-        if resolved is None:
-            raise NoCompatibleModelError(_no_compatible_model_message(pool, request))
-        effective_request, notes = resolved
-        exact_matches = [m for m in pool if passes_hard_gate(m, effective_request)]
+        return None
+    return exact_matches, notes, effective_request
 
+
+def _build_selection(
+    exact_matches: list[VideoModelCatalogEntry],
+    notes: list[str],
+    effective_request: VideoRequest,
+    original_request: VideoRequest,
+) -> ResolvedSelection:
     ranked = sorted(exact_matches, key=lambda m: score_model(m, effective_request, exact_matches), reverse=True)
     chain = [m.model_id for m in ranked]
 
@@ -390,7 +411,7 @@ def select_best_model(
         "video_model_selected",
         primary_model=chain[0],
         fallback_count=len(chain) - 1,
-        priority_mode=request.priority_mode.value,
+        priority_mode=original_request.priority_mode.value,
         degraded=bool(notes),
     )
     return ResolvedSelection(
@@ -400,3 +421,68 @@ def select_best_model(
         degraded_from_request=bool(notes),
         notes=notes,
     )
+
+
+def select_best_model(
+    catalog: list[VideoModelCatalogEntry], request: VideoRequest
+) -> ResolvedSelection:
+    """The section-25 select_best_model(request) entry point. Never
+    silently submits an invalid request (section 6): if the exact request
+    can't be satisfied, resolves the closest valid configuration first (or
+    raises NoCompatibleModelError if allow_degraded_config=False or
+    nothing works at all).
+
+    FREE_FIRST (section 8/9's hard billing guard) tries the free-only pool
+    first. If that pool is empty OR can't satisfy this request's
+    capabilities (even after degradation), it raises NoFreeVideoModelError
+    UNLESS request.allow_paid_fallback is explicitly True, in which case --
+    and only then -- it widens to the full (paid-inclusive) active pool.
+    This never silently substitutes a paid model (the bug this replaces:
+    the old _split_free_first() fell back to `candidates` unconditionally),
+    and it never blocks a request that free models genuinely can satisfy
+    just because paid ones exist too."""
+    active = [m for m in catalog if m.is_active and m.circuit_state != CircuitState.OPEN]
+    if not active:
+        raise NoCompatibleModelError("No active video models are currently available")
+
+    free_first = request.priority_mode == VideoPriorityMode.FREE_FIRST
+    if free_first:
+        free_pool = _free_video_models(active)
+        if free_pool:
+            result = _resolve_pool(free_pool, request)
+            if result is not None:
+                exact_matches, notes, effective_request = result
+                return _build_selection(exact_matches, notes, effective_request, request)
+            # Free model(s) exist but none -- even degraded -- can satisfy
+            # this request's specific capabilities.
+            if not request.allow_paid_fallback:
+                raise NoFreeVideoModelError(
+                    f"{len(free_pool)} free model(s) exist but none can satisfy this request's "
+                    "capabilities"
+                    + ("" if request.allow_degraded_config else ", and degradation is disabled")
+                    + ". Enable allow_paid_fallback to use a paid model, or add OpenRouter credits."
+                )
+            # else: explicit permission granted -- fall through to the full
+            # pool below.
+        elif not request.allow_paid_fallback:
+            # Hard billing guard (section 9): FREE_FIRST + no free model at
+            # all + no explicit paid-fallback permission => block before any
+            # capability check even runs. Never falls through to `active`
+            # (the pre-fix bug this replaces did exactly that, silently).
+            raise NoFreeVideoModelError(
+                "No free video-generation model is currently available on OpenRouter "
+                "(checked the live catalog's own pricing, not inferred from free text models). "
+                "Enable allow_paid_fallback to use a paid model, or add OpenRouter credits."
+            )
+        # else: allow_paid_fallback=True and no free model exists -- fall
+        # through to the full (paid-inclusive) pool, explicitly permitted.
+
+    result = _resolve_pool(active, request)
+    if result is None:
+        if not request.allow_degraded_config:
+            raise NoCompatibleModelError(
+                "No model supports the exact requested configuration and degradation is disabled"
+            )
+        raise NoCompatibleModelError(_no_compatible_model_message(active, request))
+    exact_matches, notes, effective_request = result
+    return _build_selection(exact_matches, notes, effective_request, request)

@@ -19,6 +19,12 @@ class CreateVideoJobRequest(BaseModel):
     # [first_frame_url, last_frame_url].
     input_image_urls: list[str] | None = None
     allow_degraded_config: bool = True
+    # FREE_FIRST-only hard billing guard (see app.video.router.VideoRequest):
+    # explicit, opt-in permission to use a paid model when no free video
+    # model exists or none can satisfy this request. Defaults to False so a
+    # FREE_FIRST request can never silently spend credits. Ignored for
+    # every other priority_mode.
+    allow_paid_fallback: bool = False
 
 
 class DegradationNoteOut(BaseModel):
@@ -38,6 +44,12 @@ class VideoJobOut(BaseModel):
     degraded_from_request: bool
     primary_model_id: str | None
     selected_model_id: str | None
+    # UI status FREE/PAID (section 12): is_free_route reflects the PRIMARY
+    # model's live pricing at selection time; paid_fallback_used is only
+    # ever True when priority_mode=FREE_FIRST and allow_paid_fallback was
+    # actually exercised because no free model could satisfy the request.
+    is_free_route: bool
+    paid_fallback_used: bool
     resolution: str | None
     aspect_ratio: str | None
     duration_seconds: int | None
