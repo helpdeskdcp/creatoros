@@ -109,6 +109,21 @@ async def get_owned_job(db: AsyncSession, job_id: uuid.UUID, owner_user_id: uuid
     return job
 
 
+async def list_owned_jobs(db: AsyncSession, owner_user_id: uuid.UUID, *, limit: int = 50) -> list[VideoJob]:
+    """Most-recent-first, capped -- the status UI's job history. Never
+    another user's jobs, same ownership boundary as get_owned_job."""
+    return list(
+        (
+            await db.scalars(
+                select(VideoJob)
+                .where(VideoJob.owner_user_id == owner_user_id)
+                .order_by(VideoJob.created_at.desc())
+                .limit(limit)
+            )
+        ).all()
+    )
+
+
 _IN_FLIGHT_STATUSES = (
     AIVideoJobStatus.QUEUED, AIVideoJobStatus.SUBMITTED,
     AIVideoJobStatus.PROCESSING, AIVideoJobStatus.RETRYING,

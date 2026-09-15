@@ -35,6 +35,7 @@ const NAV_SECTIONS: { label: string; items: { href: string; label: string }[] }[
       { href: "/thumbnails", label: "Thumbnails" },
       { href: "/seo", label: "SEO" },
       { href: "/shorts", label: "Shorts Factory" },
+      { href: "/video", label: "AI Video" },
     ],
   },
   {

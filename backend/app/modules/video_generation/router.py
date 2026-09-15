@@ -103,6 +103,13 @@ async def create_video_job(
     return job
 
 
+@router.get("/jobs", response_model=list[VideoJobOut])
+async def list_video_jobs(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    """The status UI's job history -- most recent first, this user's own
+    jobs only (see service.list_owned_jobs)."""
+    return await service.list_owned_jobs(db, user.id)
+
+
 @router.get("/jobs/{job_id}", response_model=VideoJobOut)
 async def get_video_job(
     job_id: uuid.UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)

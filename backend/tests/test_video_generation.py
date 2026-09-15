@@ -1667,6 +1667,40 @@ async def test_health_summary_counts_real_rows(db_session):
 
 
 @pytest.mark.asyncio
+async def test_list_jobs_endpoint_returns_only_own_jobs_most_recent_first(client, db_session):
+    owner_email = f"video-list-owner-{uuid.uuid4().hex[:8]}@example.com"
+    other_email = f"video-list-other-{uuid.uuid4().hex[:8]}@example.com"
+    owner_reg = await client.post(
+        "/api/v1/auth/register", json={"email": owner_email, "password": "supersecurepassword1"}
+    )
+    other_reg = await client.post(
+        "/api/v1/auth/register", json={"email": other_email, "password": "supersecurepassword1"}
+    )
+    owner_token = owner_reg.json()["access_token"]
+    owner_id = uuid.UUID(owner_reg.json()["user"]["id"])
+    other_id = uuid.UUID(other_reg.json()["user"]["id"])
+
+    await _seed_catalog(db_session, _model("acme/only"))
+    job_a = await vg_service.create_video_job(
+        db_session, owner_id, generation_type=VideoGenerationType.TEXT_TO_VIDEO, prompt="first",
+    )
+    job_b = await vg_service.create_video_job(
+        db_session, owner_id, generation_type=VideoGenerationType.TEXT_TO_VIDEO, prompt="second",
+    )
+    await vg_service.create_video_job(
+        db_session, other_id, generation_type=VideoGenerationType.TEXT_TO_VIDEO, prompt="not mine",
+    )
+
+    resp = await client.get("/api/v1/video/jobs", headers={"Authorization": f"Bearer {owner_token}"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    ids = [j["id"] for j in body]
+    assert set(ids) == {str(job_a.id), str(job_b.id)}
+    # most-recent-first
+    assert ids[0] == str(job_b.id)
+
+
+@pytest.mark.asyncio
 async def test_jobs_attempts_endpoint_returns_ownership_checked_history(client, db_session):
     email = f"video-attempts-api-{uuid.uuid4().hex[:8]}@example.com"
     register = await client.post("/api/v1/auth/register", json={"email": email, "password": "supersecurepassword1"})
