@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.providers.base import (
     AIProviderError,
     AIProviderUnavailableError,
+    InsufficientCreditsError,
     ModelNotAvailableError,
     PrivacyPolicyViolationError,
     RateLimitedError,
@@ -65,6 +66,7 @@ _STUCK_POLL_TIMEOUT_S = 1200  # 20 minutes
 # classification policy as app.ai.orchestrator's _NON_RETRYABLE_ON_SAME_PROVIDER.
 _NON_RETRYABLE_ON_SAME_MODEL = (
     AIProviderUnavailableError, ModelNotAvailableError, RateLimitedError, PrivacyPolicyViolationError,
+    InsufficientCreditsError,
 )
 # A distinct, clean, user-safe error code -- surfaced instead of a raw
 # per-attempt provider message when EVERY model in the fallback chain
@@ -78,6 +80,18 @@ ZDR_POLICY_BLOCKED_MESSAGE = (
     "privacy policy (Zero Data Retention guardrail), which rejected every "
     "compatible model. An administrator can review this at "
     "openrouter.ai/workspaces/default/guardrails."
+)
+# Same collapsing pattern as ZDR_POLICY_BLOCKED above, for the other
+# account-wide (never model-specific) failure mode: insufficient OpenRouter
+# credits. Must never be confused with the ZDR code -- a billing problem is
+# fixed by adding credits, a ZDR problem by an admin reviewing guardrails,
+# and conflating them sends whoever's debugging this to the wrong place.
+BILLING_INSUFFICIENT_CREDITS_ERROR_CODE = "BILLING_INSUFFICIENT_CREDITS"
+BILLING_INSUFFICIENT_CREDITS_MESSAGE = (
+    "Video generation is currently blocked because this OpenRouter account "
+    "has insufficient credits, which every compatible model was rejected "
+    "for. Add credits at openrouter.ai/settings/credits, or retry without "
+    "paid fallback enabled."
 )
 
 
@@ -315,6 +329,11 @@ async def submit_attempt(db: AsyncSession, job: VideoJob, settings: Settings | N
         )
         if isinstance(exc, PrivacyPolicyViolationError):
             await _record_zdr_block(db, model_id)
+        elif isinstance(exc, InsufficientCreditsError):
+            # Account-wide billing state, not evidence this model is
+            # unhealthy -- must never penalize its circuit breaker/
+            # reliability score the way a real provider failure would.
+            pass
         else:
             await _record_catalog_outcome(db, model_id, success=False)
         can_retry_same_model = (
@@ -360,6 +379,13 @@ async def _advance_to_next_model_or_fail(
             # error rather than surfacing the last model's raw text.
             job.error = ZDR_POLICY_BLOCKED_MESSAGE
             job.error_code = ZDR_POLICY_BLOCKED_ERROR_CODE
+        elif await _all_attempts_billing_blocked(db, job.id):
+            # Same collapsing pattern, for insufficient credits -- an
+            # account-wide condition, never a per-model one, and must never
+            # be reported as the ZDR code above just because both happen to
+            # fail every model in the chain the same way.
+            job.error = BILLING_INSUFFICIENT_CREDITS_MESSAGE
+            job.error_code = BILLING_INSUFFICIENT_CREDITS_ERROR_CODE
         job.completed_at = datetime.now(UTC)
         await db.commit()
         logger.error(
@@ -414,6 +440,17 @@ async def _all_attempts_zdr_blocked(db: AsyncSession, job_id: uuid.UUID) -> bool
         )
     ).all()
     return bool(attempts) and all(a.error_code == "PrivacyPolicyViolationError" for a in attempts)
+
+
+async def _all_attempts_billing_blocked(db: AsyncSession, job_id: uuid.UUID) -> bool:
+    attempts = (
+        await db.scalars(
+            select(VideoGenerationAttempt).where(
+                VideoGenerationAttempt.video_job_id == job_id, VideoGenerationAttempt.outcome == "failed"
+            )
+        )
+    ).all()
+    return bool(attempts) and all(a.error_code == "InsufficientCreditsError" for a in attempts)
 
 
 async def poll_and_progress_jobs(db: AsyncSession, settings: Settings | None = None) -> dict:

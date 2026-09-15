@@ -23,6 +23,7 @@ from app.ai.providers.base import (
     AIGenerationTimeoutError,
     AIProviderError,
     AIProviderUnavailableError,
+    InsufficientCreditsError,
     ModelNotAvailableError,
     PrivacyPolicyViolationError,
     RateLimitedError,
@@ -381,6 +382,42 @@ def test_free_first_mode_blocks_when_free_model_lacks_capability_and_no_fallback
         select_best_model([free_wrong_capability, paid_capable], req)
 
 
+def test_free_first_rejects_free_model_with_unsupported_resolution():
+    free_wrong_resolution = _model("acme/free", is_free=True, resolutions=["480p"])
+    paid_capable = _model("acme/paid", is_free=False, resolutions=["1080p"])
+    req = VideoRequest(
+        generation_type=VideoGenerationType.TEXT_TO_VIDEO, resolution="1080p",
+        priority_mode=VideoPriorityMode.FREE_FIRST, allow_degraded_config=False,
+    )
+    with pytest.raises(NoFreeVideoModelError):
+        select_best_model([free_wrong_resolution, paid_capable], req)
+
+
+def test_free_first_rejects_free_model_with_unsupported_duration():
+    free_wrong_duration = _model("acme/free", is_free=True, durations=[5])
+    paid_capable = _model("acme/paid", is_free=False, durations=[10])
+    req = VideoRequest(
+        generation_type=VideoGenerationType.TEXT_TO_VIDEO, duration=10,
+        priority_mode=VideoPriorityMode.FREE_FIRST, allow_degraded_config=False,
+    )
+    with pytest.raises(NoFreeVideoModelError):
+        select_best_model([free_wrong_duration, paid_capable], req)
+
+
+def test_free_first_fallback_chain_stays_entirely_free_when_multiple_free_models_exist():
+    # If one free model fails, the next attempt should be another free
+    # model -- never jump to a paid one while a free candidate remains.
+    free_a = _model("acme/free-a", is_free=True, quality=0.9)
+    free_b = _model("acme/free-b", is_free=True, quality=0.5)
+    paid = _model("acme/paid", is_free=False, quality=1.0)
+    req = VideoRequest(generation_type=VideoGenerationType.TEXT_TO_VIDEO, priority_mode=VideoPriorityMode.FREE_FIRST)
+
+    selection = select_best_model([paid, free_a, free_b], req)
+    assert selection.primary_model_id == "acme/free-a"
+    assert selection.fallback_chain == ["acme/free-b"]
+    assert "acme/paid" not in selection.fallback_chain
+
+
 def test_no_compatible_model_raises_when_catalog_empty():
     with pytest.raises(NoCompatibleModelError):
         select_best_model([], VideoRequest(generation_type=VideoGenerationType.TEXT_TO_VIDEO))
@@ -568,7 +605,7 @@ async def test_submit_job_insufficient_credits_raises_typed_error(monkeypatch):
         lambda **kw: _FakeVideoAsyncClient(_FakeResponse(402, text="insufficient credits")),
     )
     provider = OpenRouterVideoProvider(_settings_with_key())
-    with pytest.raises(AIProviderError, match="Insufficient OpenRouter credits"):
+    with pytest.raises(InsufficientCreditsError, match="Insufficient OpenRouter credits"):
         await provider.submit_job({"model": "alibaba/wan-3.0-prime"})
 
 
@@ -1116,6 +1153,50 @@ async def test_mixed_failures_do_not_get_the_clean_zdr_code(db_session, monkeypa
 
     assert job.status == AIVideoJobStatus.FAILED
     assert job.error_code != vg_service.ZDR_POLICY_BLOCKED_ERROR_CODE
+
+
+@pytest.mark.asyncio
+async def test_job_failed_by_insufficient_credits_on_every_model_gets_clean_billing_code(db_session, monkeypatch):
+    # Requirement: a billing failure must get its OWN clean code -- never
+    # collapsed into ZDR_POLICY_BLOCKED or left as a generic provider error,
+    # since the fix (add credits) is completely different from either.
+    user = await _make_user(db_session, "video-billing-exhausted@example.com")
+    await _seed_catalog(db_session, _model("acme/only"))
+    job = await vg_service.create_video_job(
+        db_session, user.id, generation_type=VideoGenerationType.TEXT_TO_VIDEO, prompt="x",
+    )
+    assert job.max_attempts == 1
+
+    fake_provider = _ScriptedVideoProvider(submit_results=[InsufficientCreditsError("insufficient credits")])
+    monkeypatch.setattr(
+        "app.modules.video_generation.service.OpenRouterVideoProvider", lambda settings: fake_provider
+    )
+    await vg_service.submit_attempt(db_session, job)
+
+    assert job.status == AIVideoJobStatus.FAILED
+    assert job.error_code == vg_service.BILLING_INSUFFICIENT_CREDITS_ERROR_CODE
+    assert job.error_code != vg_service.ZDR_POLICY_BLOCKED_ERROR_CODE
+    assert "credits" in job.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_billing_failure_does_not_penalize_the_models_circuit_breaker(db_session, monkeypatch):
+    user = await _make_user(db_session, "video-billing-circuit@example.com")
+    await _seed_catalog(db_session, _model("acme/only"))
+    job = await vg_service.create_video_job(
+        db_session, user.id, generation_type=VideoGenerationType.TEXT_TO_VIDEO, prompt="x",
+    )
+    fake_provider = _ScriptedVideoProvider(submit_results=[InsufficientCreditsError("insufficient credits")])
+    monkeypatch.setattr(
+        "app.modules.video_generation.service.OpenRouterVideoProvider", lambda settings: fake_provider
+    )
+    await vg_service.submit_attempt(db_session, job)
+
+    row = await db_session.scalar(
+        select(VideoModelCatalogEntry).where(VideoModelCatalogEntry.model_id == "acme/only")
+    )
+    assert row.failure_count == 0
+    assert row.consecutive_failures == 0
 
 
 # ---------------------------------------------------------------------------

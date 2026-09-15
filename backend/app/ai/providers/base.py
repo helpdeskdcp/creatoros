@@ -75,6 +75,18 @@ class PrivacyPolicyViolationError(AIProviderError):
     error code)."""
 
 
+class InsufficientCreditsError(AIProviderError):
+    """The provider responded with HTTP 402 -- this account's balance, not
+    any model's availability or a privacy/guardrail decision. Distinct
+    from every other AIProviderError so a billing failure is never
+    misclassified as a generic provider error, a rate limit, or (most
+    importantly) a ZDR/guardrail block, which would send an operator
+    looking in the wrong place entirely. Account-wide, not model-specific
+    -- retrying the same model, or a different one, cannot succeed until
+    credits are added (see app.modules.video_generation.service's clean
+    BILLING_INSUFFICIENT_CREDITS error code)."""
+
+
 class AIProvider(ABC):
     name: str
 
