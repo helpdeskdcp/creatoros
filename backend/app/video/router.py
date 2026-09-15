@@ -109,6 +109,20 @@ class NoFreeVideoModelError(NoCompatibleModelError):
     silently substitute a paid model."""
 
 
+class CostVerificationRequiredError(NoCompatibleModelError):
+    """The only model(s) that could otherwise satisfy this request have
+    pricing_status="UNKNOWN" (see VideoModelCatalogEntry.pricing_status) --
+    a provider this codebase has no queryable, confirmed price/free signal
+    for (as of this writing: any NVIDIA model, since NVIDIA publishes no
+    per-model machine-readable pricing the way OpenRouter's catalog
+    exposes pricing_skus). Cost-unverified models are excluded from EVERY
+    selection pool, not just FREE_FIRST's -- "if provider/model cost
+    cannot be verified, do not automatically submit the job" applies
+    regardless of priority_mode. The caller must surface this as a
+    "Cost verification required" response, never silently fall through
+    to a model whose price is simply unknown."""
+
+
 def _loads(text: str | None) -> list:
     """Parses a stored capability-array JSON column back into a list.
     Real OpenRouter models (e.g. black-forest-labs/flux-video-edit,
@@ -391,13 +405,24 @@ def _resolve_pool(
     return exact_matches, notes, effective_request
 
 
+_NO_EXPLICIT_FALLBACK_PRIORITY = 2**31 - 1
+
+
 def _build_selection(
     exact_matches: list[VideoModelCatalogEntry],
     notes: list[str],
     effective_request: VideoRequest,
     original_request: VideoRequest,
 ) -> ResolvedSelection:
-    ranked = sorted(exact_matches, key=lambda m: score_model(m, effective_request, exact_matches), reverse=True)
+    # Explicit provider-priority tiers (fallback_priority, e.g. NVIDIA=0)
+    # win outright over the score; models sharing a tier -- including
+    # every OpenRouter row today, which all leave fallback_priority unset
+    # -- are ranked exactly as before, purely by score_model.
+    def _rank_key(m: VideoModelCatalogEntry) -> tuple[int, float]:
+        tier = m.fallback_priority if m.fallback_priority is not None else _NO_EXPLICIT_FALLBACK_PRIORITY
+        return (tier, -score_model(m, effective_request, exact_matches))
+
+    ranked = sorted(exact_matches, key=_rank_key)
     chain = [m.model_id for m in ranked]
 
     validated_params = {
@@ -441,9 +466,15 @@ def select_best_model(
     the old _split_free_first() fell back to `candidates` unconditionally),
     and it never blocks a request that free models genuinely can satisfy
     just because paid ones exist too."""
-    active = [m for m in catalog if m.is_active and m.circuit_state != CircuitState.OPEN]
-    if not active:
+    active_any_price = [m for m in catalog if m.is_active and m.circuit_state != CircuitState.OPEN]
+    if not active_any_price:
         raise NoCompatibleModelError("No active video models are currently available")
+
+    # Cost safety, applies to EVERY priority_mode (not just FREE_FIRST):
+    # a model with no confirmed price/free signal is never automatically
+    # eligible. See CostVerificationRequiredError.
+    active = [m for m in active_any_price if m.pricing_status != "UNKNOWN"]
+    cost_unverified = [m for m in active_any_price if m.pricing_status == "UNKNOWN"]
 
     free_first = request.priority_mode == VideoPriorityMode.FREE_FIRST
     if free_first:
@@ -479,6 +510,14 @@ def select_best_model(
 
     result = _resolve_pool(active, request)
     if result is None:
+        cost_blocked = [m for m in cost_unverified if passes_hard_gate(m, request)]
+        if cost_blocked:
+            raise CostVerificationRequiredError(
+                f"{len(cost_blocked)} model(s) could satisfy this request "
+                f"({', '.join(m.model_id for m in cost_blocked)}) but their pricing has not been "
+                "confirmed as free or paid, so they cannot be used automatically. Verify pricing and "
+                "set pricing_status explicitly before enabling them."
+            )
         if not request.allow_degraded_config:
             raise NoCompatibleModelError(
                 "No model supports the exact requested configuration and degradation is disabled"

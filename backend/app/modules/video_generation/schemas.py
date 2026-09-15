@@ -70,6 +70,14 @@ class VideoModelOut(BaseModel):
     name: str
     provider: str
     is_free: bool
+    # "FREE" | "PAID" | "UNKNOWN" -- UNKNOWN means this codebase has no
+    # confirmed price/free signal for the model, and the router will never
+    # auto-submit to it regardless of is_free/priority (see
+    # app.video.router.CostVerificationRequiredError).
+    pricing_status: str
+    # Explicit provider-priority tier (lower = tried first); null means no
+    # override -- ranked purely by quality_tier_score/cost/etc among peers.
+    fallback_priority: int | None
     is_active: bool
     supports_audio: bool
     quality_tier_score: float

@@ -37,9 +37,11 @@ from app.modules.video_generation.models import (
     VideoPriorityMode,
 )
 from app.video import catalog as catalog_module
+from app.video.providers.nvidia_video import NVIDIAVideoProvider
 from app.video.providers.openrouter_video import OpenRouterVideoProvider
 from app.video.qc import run_qc
 from app.video.router import (
+    CostVerificationRequiredError,
     NoCompatibleModelError,
     NoFreeVideoModelError,
     ResolvedSelection,
@@ -207,6 +209,8 @@ async def create_video_job(
         selection: ResolvedSelection = select_best_model(catalog, request)
     except NoFreeVideoModelError:
         raise
+    except CostVerificationRequiredError:
+        raise
     except NoCompatibleModelError as exc:
         raise ValidationError(str(exc)) from exc
 
@@ -301,6 +305,51 @@ def _build_payload(model_id: str, job: VideoJob) -> dict:
     return payload
 
 
+# A CreatorOS request only carries a duration in seconds, never an fps --
+# NVIDIA's Cosmos schema needs num_output_frames = duration * fps, so a
+# fixed, documented default fills the gap rather than guessing per model.
+_NVIDIA_DEFAULT_FPS = 24
+
+
+def _build_nvidia_payload(job: VideoJob) -> dict:
+    """NVIDIA's Cosmos3-Generator schema is far simpler than OpenRouter's
+    (see app.video.providers.nvidia_video's module docstring) -- deliberately
+    NOT sharing _build_payload's OpenRouter-specific field names
+    (input_references/frame_images) with it."""
+    assert job.validated_params_json is not None, "job must have a resolved validated_params_json before submission"
+    params = json.loads(job.validated_params_json)
+    payload: dict = {"fps": _NVIDIA_DEFAULT_FPS}
+    if job.prompt:
+        payload["prompt"] = job.prompt
+    if params.get("resolution"):
+        payload["resolution"] = params["resolution"]
+    if params.get("duration"):
+        payload["duration"] = params["duration"]
+    if job.input_references_json:
+        refs = json.loads(job.input_references_json)
+        if refs:
+            payload["image"] = refs[0]
+    return payload
+
+
+def _build_payload_for_model(model_id: str, job: VideoJob) -> dict:
+    if model_id.split("/", 1)[0] == "nvidia":
+        return _build_nvidia_payload(job)
+    return _build_payload(model_id, job)
+
+
+def _provider_for_model_id(model_id: str, settings: Settings):
+    """Provider dispatch, keyed off the model_id namespace convention
+    already used throughout the catalog (e.g. "google/veo-3.1",
+    "nvidia/<model>") -- see app.video.catalog.normalize_model /
+    refresh_nvidia_catalog. Every model not explicitly namespaced "nvidia/"
+    is routed to OpenRouter, unchanged from before this dispatcher existed."""
+    provider_name = model_id.split("/", 1)[0] if "/" in model_id else ""
+    if provider_name == "nvidia":
+        return NVIDIAVideoProvider(settings)
+    return OpenRouterVideoProvider(settings)
+
+
 async def submit_attempt(db: AsyncSession, job: VideoJob, settings: Settings | None = None) -> None:
     """Submits `job.selected_model_id` to OpenRouter and records the
     attempt. On a same-model-retryable failure, retries the SAME model up
@@ -309,9 +358,9 @@ async def submit_attempt(db: AsyncSession, job: VideoJob, settings: Settings | N
     immediately. Never leaves the job silently stuck -- every path ends in
     SUBMITTED, RETRYING (with next_retry_at set), or FAILED."""
     settings = settings or get_settings()
-    provider = OpenRouterVideoProvider(settings)
     assert job.selected_model_id is not None, "submit_attempt requires a resolved selected_model_id"
     model_id = job.selected_model_id
+    provider = _provider_for_model_id(model_id, settings)
     same_model_attempts = len(
         (
             await db.scalars(
@@ -325,7 +374,7 @@ async def submit_attempt(db: AsyncSession, job: VideoJob, settings: Settings | N
     job.attempt += 1
     started_at = datetime.now(UTC)
     start = time.perf_counter()
-    payload = _build_payload(model_id, job)
+    payload = _build_payload_for_model(model_id, job)
     try:
         result = await provider.submit_job(payload)
     except AIProviderError as exc:
@@ -498,11 +547,11 @@ async def poll_and_progress_jobs(db: AsyncSession, settings: Settings | None = N
             select(VideoJob).where(VideoJob.status.in_([AIVideoJobStatus.SUBMITTED, AIVideoJobStatus.PROCESSING]))
         )
     ).all()
-    provider = OpenRouterVideoProvider(settings)
     for job in in_flight:
         summary["polled"] += 1
         assert job.provider_job_id is not None, "a SUBMITTED/PROCESSING job must have a provider_job_id"
         assert job.selected_model_id is not None, "a SUBMITTED/PROCESSING job must have a selected_model_id"
+        provider = _provider_for_model_id(job.selected_model_id, settings)
         try:
             result = await provider.poll_job(job.provider_job_id)
         except AIProviderError as exc:
@@ -581,7 +630,7 @@ async def _finalize_completed_job(db: AsyncSession, job: VideoJob, result, setti
     assert job.provider_job_id is not None, "a completed job must have a provider_job_id"
     assert job.selected_model_id is not None, "a completed job must have a selected_model_id"
     assert job.validated_params_json is not None, "a completed job must have validated_params_json"
-    provider = OpenRouterVideoProvider(settings)
+    provider = _provider_for_model_id(job.selected_model_id, settings)
     tmp_dir = os.path.join(settings.storage_local_path, "_tmp_video_generation")
     os.makedirs(tmp_dir, exist_ok=True)
     tmp_video_path = os.path.join(tmp_dir, f"{job.id}.mp4")

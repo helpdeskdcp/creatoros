@@ -62,6 +62,23 @@ class VideoModelCatalogEntry(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     supports_text_to_video: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     pricing_skus_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_free: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    # Tri-state, distinct from is_free: OpenRouter's live pricing_skus
+    # always resolves confidently to FREE or PAID (see catalog._is_free),
+    # so OpenRouter rows are never UNKNOWN. A provider with no queryable
+    # per-model price signal (see app.video.providers.nvidia_video) must
+    # be seeded as UNKNOWN unless an operator has explicitly confirmed
+    # otherwise -- passes_hard_gate/select_best_model treat UNKNOWN as
+    # ineligible for ANY automatic submission ("cost verification
+    # required"), never just excluded from FREE_FIRST.
+    pricing_status: Mapped[str] = mapped_column(String(16), default="PAID", nullable=False, index=True)
+    # Explicit provider-priority override (lower = tried first), separate
+    # from quality_tier_score below: NVIDIA-first routing (see the session
+    # mandate) needs a deterministic tier, not an emergent side-effect of
+    # quality/cost/latency weights that were tuned for OpenRouter-only
+    # ranking. NULL (the OpenRouter default) means "no explicit tier" --
+    # such rows rank purely by the existing score_model weights among
+    # themselves, unchanged from before this column existed.
+    fallback_priority: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     # A maintained, documented heuristic (app.video.catalog.QUALITY_TIERS) --
     # NOT sourced from OpenRouter, which exposes no quality metric. Exists
     # so quality-mode routing has something principled to sort on; every

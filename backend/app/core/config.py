@@ -113,6 +113,33 @@ class Settings(BaseSettings):
     video_max_duration_seconds: int = 30
     video_max_concurrent_jobs_per_user: int = 3
 
+    # --- NVIDIA video generation (app/video/providers/nvidia_video.py) ---
+    # NVIDIA's Cosmos family is documented (docs.nvidia.com/nim/cosmos) as a
+    # SELF-HOSTED NIM container (POST {base_url}/v1/infer, synchronous,
+    # base64 video response) -- there is no NVIDIA-operated shared endpoint
+    # this points to by default. nvidia_video_base_url must be pointed at a
+    # NIM instance the operator actually runs/controls (self-hosted, or a
+    # gateway they've set up in front of one) before this provider can do
+    # anything; NVIDIA_VIDEO_ENABLED defaults to false so its absence never
+    # changes existing behavior.
+    nvidia_api_key: str = ""
+    nvidia_video_base_url: str = "http://localhost:8000"
+    nvidia_video_model: str = ""
+    nvidia_video_enabled: bool = False
+    # Deliberately NOT inferred from documentation scraping or model name --
+    # NVIDIA publishes no queryable, per-model machine-readable price/free
+    # signal the way OpenRouter's catalog exposes pricing_skus (see the
+    # session report: Cosmos's only confirmed public path is a rate-limited,
+    # finite-credit trial playground at build.nvidia.com, with NVIDIA's own
+    # sources describing production Cosmos pricing as unpublished/enterprise-
+    # negotiated as of this writing). Defaults to UNKNOWN, which the video
+    # router treats as ineligible for automatic submission ("Cost
+    # verification required") no matter how it's prioritized. Only the
+    # operator -- who has actually read NVIDIA's current terms for whatever
+    # endpoint nvidia_video_base_url points at -- should ever set this to
+    # "FREE" or "PAID".
+    nvidia_video_pricing_status: str = "UNKNOWN"  # "FREE" | "PAID" | "UNKNOWN"
+
     # --- Billing ---
     billing_provider: str = "none"  # "none" (default -- CONFIGURATION_REQUIRED) or "stripe"
 
@@ -162,6 +189,10 @@ class Settings(BaseSettings):
     @property
     def openrouter_configured(self) -> bool:
         return bool(self.openrouter_api_key)
+
+    @property
+    def nvidia_video_configured(self) -> bool:
+        return bool(self.nvidia_video_enabled and self.nvidia_api_key and self.nvidia_video_model)
 
     @property
     def s3_configured(self) -> bool:
