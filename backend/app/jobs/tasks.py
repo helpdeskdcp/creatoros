@@ -612,3 +612,24 @@ def refresh_video_model_catalog_task():
         return result["value"]
 
     return _run(_do())
+
+
+@shared_task
+def reconcile_stuck_video_jobs_task():
+    """Section 12: finds VideoJob rows stuck in QUEUED beyond
+    _STUCK_QUEUED_TIMEOUT_S (their initial submission dispatch was lost --
+    a real failure mode this platform hit live: a worker crash between a
+    job's creation and its first submit_video_job_task.delay() call) and
+    redispatches them. Beat-scheduled every 5 minutes."""
+    async def _do():
+        async with _tracked_job("reconcile_stuck_video_jobs_task") as result:
+            async with WorkerSessionLocal() as db:
+                from app.modules.video_generation.service import find_stuck_queued_job_ids
+
+                stuck_ids = await find_stuck_queued_job_ids(db)
+            for job_id in stuck_ids:
+                submit_video_job_task.delay(job_id)
+            result["redispatched"] = len(stuck_ids)
+        return result
+
+    return _run(_do())

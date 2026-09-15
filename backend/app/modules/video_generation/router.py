@@ -1,3 +1,4 @@
+import json
 import os
 import uuid
 
@@ -12,9 +13,17 @@ from app.db.session import get_db
 from app.modules.auth.dependencies import get_current_user
 from app.modules.users.models import User
 from app.modules.video_generation import service
-from app.modules.video_generation.models import VideoJob
-from app.modules.video_generation.schemas import CreateVideoJobRequest, VideoJobOut, VideoModelOut
-from app.video.catalog import list_active_models
+from app.modules.video_generation.models import VideoGenerationAttempt
+from app.modules.video_generation.schemas import (
+    CreateVideoJobRequest,
+    VideoCapabilitiesOut,
+    VideoGenerationAttemptOut,
+    VideoHealthOut,
+    VideoJobOut,
+    VideoJobRoutingOut,
+    VideoModelOut,
+)
+from app.video.catalog import get_capabilities_summary, get_health_summary, list_active_models
 from app.video.models import VideoModelCatalogEntry
 
 router = APIRouter()
@@ -73,9 +82,7 @@ async def create_video_job(
 async def get_video_job(
     job_id: uuid.UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
 ):
-    job = await db.get(VideoJob, job_id)
-    if not job or job.owner_user_id != user.id:
-        raise NotFoundError("Video job not found")
+    job = await service.get_owned_job(db, job_id, user.id)
     return job
 
 
@@ -86,9 +93,7 @@ async def download_video_job_output(
     user: User = Depends(get_current_user),
     settings: Settings = Depends(_get_settings),
 ):
-    job = await db.get(VideoJob, job_id)
-    if not job or job.owner_user_id != user.id:
-        raise NotFoundError("Video job not found")
+    job = await service.get_owned_job(db, job_id, user.id)
     if not job.output_url:
         raise NotFoundError("Video output is not available yet")
     path = service.local_path_for(settings, job.output_url)
@@ -104,12 +109,65 @@ async def download_video_job_thumbnail(
     user: User = Depends(get_current_user),
     settings: Settings = Depends(_get_settings),
 ):
-    job = await db.get(VideoJob, job_id)
-    if not job or job.owner_user_id != user.id:
-        raise NotFoundError("Video job not found")
+    job = await service.get_owned_job(db, job_id, user.id)
     if not job.thumbnail_url:
         raise NotFoundError("Thumbnail is not available")
     path = service.local_path_for(settings, job.thumbnail_url)
     if not path or not os.path.isfile(path):
         raise NotFoundError("Thumbnail file is not available")
     return FileResponse(path, media_type="image/jpeg", filename=f"{job.id}.jpg")
+
+
+@router.get("/jobs/{job_id}/attempts", response_model=list[VideoGenerationAttemptOut])
+async def list_video_job_attempts(
+    job_id: uuid.UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+):
+    """Section 24: every attempt in this job's fallback/retry chain, one
+    real row each -- ownership-checked like every other job access."""
+    job = await service.get_owned_job(db, job_id, user.id)
+    attempts = (
+        await db.scalars(
+            select(VideoGenerationAttempt)
+            .where(VideoGenerationAttempt.video_job_id == job.id)
+            .order_by(VideoGenerationAttempt.attempt_number)
+        )
+    ).all()
+    return list(attempts)
+
+
+@router.get("/jobs/{job_id}/routing", response_model=VideoJobRoutingOut)
+async def get_video_job_routing(
+    job_id: uuid.UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+):
+    """Section 6: what the router decided for this job and why -- primary
+    model, remaining fallback chain, whether the request was degraded and
+    to what, without ever exposing raw provider secrets/internals."""
+    job = await service.get_owned_job(db, job_id, user.id)
+    return VideoJobRoutingOut(
+        routing_mode=job.priority_mode,
+        primary_model_id=job.primary_model_id,
+        remaining_fallback_chain=json.loads(job.fallback_chain_json) if job.fallback_chain_json else [],
+        selected_model_id=job.selected_model_id,
+        current_attempt=job.attempt,
+        max_attempts=job.max_attempts,
+        fallback_used=job.fallback_used,
+        degraded_from_request=job.degraded_from_request,
+        degradation_notes=json.loads(job.degradation_notes_json) if job.degradation_notes_json else [],
+    )
+
+
+@router.get("/capabilities", response_model=VideoCapabilitiesOut)
+async def get_video_capabilities(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    """What's actually possible right now, aggregated from the live
+    catalog -- lets a caller build a request form without a hard-coded
+    list that drifts from reality."""
+    catalog = await list_active_models(db)
+    return get_capabilities_summary(catalog)
+
+
+@router.get("/health", response_model=VideoHealthOut)
+async def get_video_health(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    """Section 18/22: real counts of active/inactive/free/ZDR-blocked
+    models and circuit-breaker states -- the same data the admin dashboard
+    would show, exposed as its own endpoint."""
+    return await get_health_summary(db)

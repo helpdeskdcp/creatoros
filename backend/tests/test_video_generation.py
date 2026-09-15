@@ -12,7 +12,8 @@ money on video generation.
 """
 import json
 import subprocess
-from datetime import UTC, datetime
+import uuid
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -23,9 +24,11 @@ from app.ai.providers.base import (
     AIProviderError,
     AIProviderUnavailableError,
     ModelNotAvailableError,
+    PrivacyPolicyViolationError,
     RateLimitedError,
 )
 from app.core.config import get_settings
+from app.core.errors import ValidationError
 from app.modules.users.models import User, UserRole
 from app.modules.video_generation import service as vg_service
 from app.modules.video_generation.models import (
@@ -330,6 +333,32 @@ def test_free_first_mode_falls_back_to_paid_when_no_free_model_capable():
 def test_no_compatible_model_raises_when_catalog_empty():
     with pytest.raises(NoCompatibleModelError):
         select_best_model([], VideoRequest(generation_type=VideoGenerationType.TEXT_TO_VIDEO))
+
+
+def test_no_compatible_model_error_names_zdr_when_thats_the_actual_reason():
+    # Live-observed real scenario: every capability-matching model has
+    # already been discovered as ZDR-blocked -- the error must say so
+    # specifically, not just "nothing available".
+    blocked_a = _model("acme/a", resolutions=["720p"])
+    blocked_a.known_zdr_blocked = True
+    blocked_b = _model("acme/b", resolutions=["720p"])
+    blocked_b.known_zdr_blocked = True
+    req = VideoRequest(generation_type=VideoGenerationType.TEXT_TO_VIDEO, resolution="720p")
+    with pytest.raises(NoCompatibleModelError, match="privacy policy"):
+        select_best_model([blocked_a, blocked_b], req)
+
+
+def test_no_compatible_model_error_stays_generic_for_genuine_capability_gap():
+    # No model anywhere supports first-frame control -- not a ZDR
+    # situation (nothing is known_zdr_blocked here), and no
+    # duration/resolution/audio downgrade could ever add that capability,
+    # so this must fall through to the generic message, never falsely
+    # claiming a privacy-policy cause.
+    model = _model("acme/a", frame_images=[])
+    req = VideoRequest(generation_type=VideoGenerationType.FIRST_FRAME)
+    with pytest.raises(NoCompatibleModelError) as exc_info:
+        select_best_model([model], req)
+    assert "privacy policy" not in str(exc_info.value)
 
 
 def test_closest_valid_config_degrades_resolution_when_unavailable():
@@ -847,3 +876,404 @@ async def test_newly_discovered_model_is_immediately_selectable(db_session, monk
     req = VideoRequest(generation_type=VideoGenerationType.TEXT_TO_VIDEO)
     selection = select_best_model(catalog, req)
     assert selection.primary_model_id == "brand-new/v1"
+
+
+# ---------------------------------------------------------------------------
+# ZDR / privacy guardrail detection and policy-aware routing
+# ---------------------------------------------------------------------------
+
+def _guardrail_404_response() -> _FakeResponse:
+    # Exact shape live-verified against the real OpenRouter API.
+    body = {
+        "error": {
+            "message": "0 endpoints out of 1 requested are available matching your guardrail restrictions",
+            "code": 404,
+            "metadata": {"ineligibility_reasons": [{"reason": "zdr-violation-by-guardrail", "endpoint_count": 1}]},
+        }
+    }
+    return _FakeResponse(404, body, text=json.dumps(body))
+
+
+@pytest.mark.asyncio
+async def test_zdr_guardrail_rejection_raises_dedicated_error_not_generic_404(monkeypatch):
+    monkeypatch.setattr(
+        "app.video.providers.openrouter_video.httpx.AsyncClient",
+        lambda **kw: _FakeVideoAsyncClient(_guardrail_404_response()),
+    )
+    provider = OpenRouterVideoProvider(_settings_with_key())
+    with pytest.raises(PrivacyPolicyViolationError):
+        await provider.submit_job({"model": "some/model", "prompt": "x"})
+
+
+@pytest.mark.asyncio
+async def test_genuine_unknown_model_404_still_raises_model_not_available(monkeypatch):
+    # A plain 404 (no guardrail metadata) must NOT be misclassified as a
+    # privacy violation -- the two are handled completely differently.
+    monkeypatch.setattr(
+        "app.video.providers.openrouter_video.httpx.AsyncClient",
+        lambda **kw: _FakeVideoAsyncClient(_FakeResponse(404, {"error": {"message": "not found", "code": 404}})),
+    )
+    provider = OpenRouterVideoProvider(_settings_with_key())
+    with pytest.raises(ModelNotAvailableError):
+        await provider.submit_job({"model": "nonexistent/model", "prompt": "x"})
+
+
+def test_zdr_blocked_model_is_gated_out_of_routing():
+    blocked = _model("acme/blocked")
+    blocked.known_zdr_blocked = True
+    healthy = _model("acme/ok")
+    req = VideoRequest(generation_type=VideoGenerationType.TEXT_TO_VIDEO)
+    assert passes_hard_gate(blocked, req) is False
+    selection = select_best_model([blocked, healthy], req)
+    assert selection.primary_model_id == "acme/ok"
+
+
+def test_mark_zdr_blocked_sets_flag_and_counts_as_failure():
+    model = _model("acme/x")
+    catalog_module.mark_zdr_blocked(model)
+    assert model.known_zdr_blocked is True
+    assert model.zdr_blocked_at is not None
+    assert model.failure_count == 1
+    assert model.consecutive_failures == 1
+
+
+@pytest.mark.asyncio
+async def test_submission_marks_model_zdr_blocked_and_escalates(db_session, monkeypatch):
+    user = await _make_user(db_session, "video-zdr-escalate@example.com")
+    await _seed_catalog(db_session, _model("acme/blocked"), _model("acme/backup"))
+    job = await vg_service.create_video_job(
+        db_session, user.id, generation_type=VideoGenerationType.TEXT_TO_VIDEO, prompt="x",
+    )
+
+    fake_provider = _ScriptedVideoProvider(submit_results=[PrivacyPolicyViolationError("blocked by guardrail")])
+    monkeypatch.setattr(
+        "app.modules.video_generation.service.OpenRouterVideoProvider", lambda settings: fake_provider
+    )
+    await vg_service.submit_attempt(db_session, job)
+
+    assert job.selected_model_id == "acme/backup"
+    assert job.status == AIVideoJobStatus.RETRYING
+
+    blocked_row = await db_session.scalar(
+        select(VideoModelCatalogEntry).where(VideoModelCatalogEntry.model_id == "acme/blocked")
+    )
+    assert blocked_row.known_zdr_blocked is True
+
+
+@pytest.mark.asyncio
+async def test_job_failed_by_zdr_on_every_model_gets_clean_error_code(db_session, monkeypatch):
+    user = await _make_user(db_session, "video-zdr-exhausted@example.com")
+    await _seed_catalog(db_session, _model("acme/only"))
+    job = await vg_service.create_video_job(
+        db_session, user.id, generation_type=VideoGenerationType.TEXT_TO_VIDEO, prompt="x",
+    )
+    assert job.max_attempts == 1
+
+    fake_provider = _ScriptedVideoProvider(submit_results=[PrivacyPolicyViolationError("blocked")])
+    monkeypatch.setattr(
+        "app.modules.video_generation.service.OpenRouterVideoProvider", lambda settings: fake_provider
+    )
+    await vg_service.submit_attempt(db_session, job)
+
+    assert job.status == AIVideoJobStatus.FAILED
+    assert job.error_code == vg_service.ZDR_POLICY_BLOCKED_ERROR_CODE
+    assert "openrouter.ai/workspaces" in job.error
+    # The raw per-attempt provider text must never be the final surfaced
+    # error once we know it was a uniform policy block.
+    assert job.error != "blocked"
+
+
+@pytest.mark.asyncio
+async def test_mixed_failures_do_not_get_the_clean_zdr_code(db_session, monkeypatch):
+    # If even ONE attempt failed for a different reason, don't claim it
+    # was purely a privacy-policy block -- that would be misleading.
+    user = await _make_user(db_session, "video-mixed-fail@example.com")
+    await _seed_catalog(db_session, _model("acme/a"), _model("acme/b"))
+    job = await vg_service.create_video_job(
+        db_session, user.id, generation_type=VideoGenerationType.TEXT_TO_VIDEO, prompt="x",
+    )
+
+    fake_provider = _ScriptedVideoProvider(submit_results=[
+        AIProviderUnavailableError("network blip"),
+        PrivacyPolicyViolationError("blocked"),
+    ])
+    monkeypatch.setattr(
+        "app.modules.video_generation.service.OpenRouterVideoProvider", lambda settings: fake_provider
+    )
+    await vg_service.submit_attempt(db_session, job)  # acme/a fails -> escalate
+    await vg_service.submit_attempt(db_session, job)  # acme/b fails -> exhausted
+
+    assert job.status == AIVideoJobStatus.FAILED
+    assert job.error_code != vg_service.ZDR_POLICY_BLOCKED_ERROR_CODE
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker: OPEN -> HALF_OPEN cooldown recovery
+# ---------------------------------------------------------------------------
+
+def test_circuit_recovers_to_half_open_after_cooldown():
+    model = _model("acme/x", circuit_state=CircuitState.OPEN)
+    model.circuit_opened_at = datetime.now(UTC) - timedelta(seconds=400)
+    recovered = catalog_module.recover_expired_circuits([model], cooldown_seconds=300)
+    assert recovered == 1
+    assert model.circuit_state == CircuitState.HALF_OPEN
+
+
+def test_circuit_does_not_recover_before_cooldown_elapses():
+    model = _model("acme/x", circuit_state=CircuitState.OPEN)
+    model.circuit_opened_at = datetime.now(UTC) - timedelta(seconds=60)
+    recovered = catalog_module.recover_expired_circuits([model], cooldown_seconds=300)
+    assert recovered == 0
+    assert model.circuit_state == CircuitState.OPEN
+
+
+def test_half_open_probe_failure_reopens_circuit():
+    model = _model("acme/x", circuit_state=CircuitState.HALF_OPEN)
+    catalog_module.record_failure(model)
+    assert model.circuit_state == CircuitState.OPEN
+
+
+def test_half_open_probe_success_closes_circuit():
+    model = _model("acme/x", circuit_state=CircuitState.HALF_OPEN)
+    catalog_module.record_success(model, latency_ms=1000)
+    assert model.circuit_state == CircuitState.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_list_active_models_auto_recovers_expired_circuits(db_session):
+    model = _model("acme/recoverable", circuit_state=CircuitState.OPEN)
+    model.circuit_opened_at = datetime.now(UTC) - timedelta(seconds=400)
+    db_session.add(model)
+    await db_session.commit()
+
+    active = await catalog_module.list_active_models(db_session)
+    recovered = next(m for m in active if m.model_id == "acme/recoverable")
+    assert recovered.circuit_state == CircuitState.HALF_OPEN
+
+
+# ---------------------------------------------------------------------------
+# Cost / concurrency / duration limits
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_duration_over_configured_max_is_rejected(db_session):
+    user = await _make_user(db_session, "video-duration-limit@example.com")
+    await _seed_catalog(db_session, _model("acme/x", durations=list(range(1, 61))))
+    settings = get_settings()
+    with pytest.raises(ValidationError):
+        await vg_service.create_video_job(
+            db_session, user.id, generation_type=VideoGenerationType.TEXT_TO_VIDEO, prompt="x",
+            duration=settings.video_max_duration_seconds + 5,
+        )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_job_limit_is_enforced(db_session):
+    user = await _make_user(db_session, "video-concurrency-limit@example.com")
+    await _seed_catalog(db_session, _model("acme/x"))
+    settings = get_settings()
+    for _ in range(settings.video_max_concurrent_jobs_per_user):
+        await vg_service.create_video_job(
+            db_session, user.id, generation_type=VideoGenerationType.TEXT_TO_VIDEO, prompt="x",
+        )
+    with pytest.raises(ValidationError):
+        await vg_service.create_video_job(
+            db_session, user.id, generation_type=VideoGenerationType.TEXT_TO_VIDEO, prompt="one too many",
+        )
+
+
+@pytest.mark.asyncio
+async def test_daily_cost_limit_is_enforced(db_session):
+    user = await _make_user(db_session, "video-cost-limit@example.com")
+    settings = get_settings()
+    # A model priced well above the daily limit for a single job.
+    expensive = _model("acme/expensive", pricing={"duration_seconds": settings.video_daily_cost_limit_usd + 1})
+    await _seed_catalog(db_session, expensive)
+    with pytest.raises(ValidationError):
+        await vg_service.create_video_job(
+            db_session, user.id, generation_type=VideoGenerationType.TEXT_TO_VIDEO, prompt="x", duration=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_cost_estimate_is_recorded_at_job_creation(db_session):
+    user = await _make_user(db_session, "video-cost-estimate@example.com")
+    await _seed_catalog(db_session, _model("acme/x", pricing={"duration_seconds": "0.10"}))
+    job = await vg_service.create_video_job(
+        db_session, user.id, generation_type=VideoGenerationType.TEXT_TO_VIDEO, prompt="x", duration=2,
+    )
+    assert job.cost_estimate == pytest.approx(0.20)
+
+
+# ---------------------------------------------------------------------------
+# Stuck-job reconciliation (section 12)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_find_stuck_queued_jobs_beyond_threshold(db_session):
+    user = await _make_user(db_session, "video-stuck@example.com")
+    await _seed_catalog(db_session, _model("acme/x"))
+    job = await vg_service.create_video_job(
+        db_session, user.id, generation_type=VideoGenerationType.TEXT_TO_VIDEO, prompt="x",
+    )
+    # Simulate this job having sat untouched (dispatch lost) well past the
+    # reconciliation threshold.
+    job.created_at = datetime.now(UTC) - timedelta(seconds=vg_service._STUCK_QUEUED_TIMEOUT_S + 60)
+    await db_session.commit()
+
+    stuck_ids = await vg_service.find_stuck_queued_job_ids(db_session)
+    assert str(job.id) in stuck_ids
+
+
+@pytest.mark.asyncio
+async def test_recently_queued_job_is_not_considered_stuck(db_session):
+    user = await _make_user(db_session, "video-not-stuck@example.com")
+    await _seed_catalog(db_session, _model("acme/x"))
+    job = await vg_service.create_video_job(
+        db_session, user.id, generation_type=VideoGenerationType.TEXT_TO_VIDEO, prompt="x",
+    )
+    stuck_ids = await vg_service.find_stuck_queued_job_ids(db_session)
+    assert str(job.id) not in stuck_ids
+
+
+@pytest.mark.asyncio
+async def test_persistent_poll_failure_eventually_escalates_instead_of_looping_forever(db_session, monkeypatch):
+    user = await _make_user(db_session, "video-stuck-poll@example.com")
+    await _seed_catalog(db_session, _model("acme/a"), _model("acme/b"))
+    job = await vg_service.create_video_job(
+        db_session, user.id, generation_type=VideoGenerationType.TEXT_TO_VIDEO, prompt="x",
+    )
+    job.status = AIVideoJobStatus.SUBMITTED
+    job.provider_job_id = "job-stuck-1"
+    job.submitted_at = datetime.now(UTC) - timedelta(seconds=vg_service._STUCK_POLL_TIMEOUT_S + 120)
+    await db_session.commit()
+
+    class _AlwaysFailingPoll:
+        async def poll_job(self, provider_job_id):
+            raise AIProviderUnavailableError("poll endpoint down")
+
+    monkeypatch.setattr(
+        "app.modules.video_generation.service.OpenRouterVideoProvider", lambda s: _AlwaysFailingPoll()
+    )
+    summary = await vg_service.poll_and_progress_jobs(db_session)
+    assert summary["failed"] == 1
+    await db_session.refresh(job)
+    assert job.status == AIVideoJobStatus.RETRYING
+    assert job.selected_model_id == "acme/b"
+
+
+# ---------------------------------------------------------------------------
+# New visibility endpoints (attempts, routing, capabilities, health)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_capabilities_summary_reflects_only_usable_models(db_session):
+    good = _model("acme/good", resolutions=["720p"], durations=[5], aspect_ratios=["16:9"], audio=True)
+    blocked = _model("acme/blocked", resolutions=["4K"])
+    blocked.known_zdr_blocked = True
+    open_circuit = _model("acme/broken", resolutions=["1080p"], circuit_state=CircuitState.OPEN)
+    summary = catalog_module.get_capabilities_summary([good, blocked, open_circuit])
+    assert summary["resolutions"] == ["720p"]
+    assert summary["durations"] == [5]
+    assert summary["audio_capable_model_count"] == 1
+    assert "TEXT_TO_VIDEO" in summary["generation_types"]
+
+
+@pytest.mark.asyncio
+async def test_health_summary_counts_real_rows(db_session):
+    await _seed_catalog(
+        db_session,
+        _model("acme/a", is_free=True),
+        _model("acme/b", is_active=False),
+        _model("acme/c", circuit_state=CircuitState.OPEN),
+    )
+    summary = await catalog_module.get_health_summary(db_session)
+    assert summary["total_models"] == 3
+    assert summary["active_models"] == 2
+    assert summary["inactive_models"] == 1
+    assert summary["free_models"] == 1
+    assert summary["circuit_breakers"]["open"] == 1
+
+
+@pytest.mark.asyncio
+async def test_jobs_attempts_endpoint_returns_ownership_checked_history(client, db_session):
+    email = f"video-attempts-api-{uuid.uuid4().hex[:8]}@example.com"
+    register = await client.post("/api/v1/auth/register", json={"email": email, "password": "supersecurepassword1"})
+    token = register.json()["access_token"]
+    user_id = uuid.UUID(register.json()["user"]["id"])
+
+    await _seed_catalog(db_session, _model("acme/only"))
+    job = await vg_service.create_video_job(
+        db_session, user_id, generation_type=VideoGenerationType.TEXT_TO_VIDEO, prompt="x",
+    )
+    db_session.add(VideoGenerationAttempt(
+        video_job_id=job.id, attempt_number=1, model_id="acme/only", outcome="failed",
+        error_code="ModelNotAvailableError", error="gone",
+        started_at=datetime.now(UTC), finished_at=datetime.now(UTC),
+    ))
+    await db_session.commit()
+
+    resp = await client.get(f"/api/v1/video/jobs/{job.id}/attempts", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["model_id"] == "acme/only"
+
+
+@pytest.mark.asyncio
+async def test_jobs_attempts_endpoint_rejects_other_users_job(client, db_session):
+    owner_email = f"video-owner-{uuid.uuid4().hex[:8]}@example.com"
+    attacker_email = f"video-attacker-{uuid.uuid4().hex[:8]}@example.com"
+    owner_reg = await client.post(
+        "/api/v1/auth/register", json={"email": owner_email, "password": "supersecurepassword1"}
+    )
+    attacker_reg = await client.post(
+        "/api/v1/auth/register", json={"email": attacker_email, "password": "supersecurepassword1"}
+    )
+    owner_id = uuid.UUID(owner_reg.json()["user"]["id"])
+    attacker_token = attacker_reg.json()["access_token"]
+
+    await _seed_catalog(db_session, _model("acme/only"))
+    job = await vg_service.create_video_job(
+        db_session, owner_id, generation_type=VideoGenerationType.TEXT_TO_VIDEO, prompt="x",
+    )
+
+    resp = await client.get(
+        f"/api/v1/video/jobs/{job.id}/attempts", headers={"Authorization": f"Bearer {attacker_token}"}
+    )
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_jobs_routing_endpoint_reflects_selection(client, db_session):
+    email = f"video-routing-api-{uuid.uuid4().hex[:8]}@example.com"
+    register = await client.post("/api/v1/auth/register", json={"email": email, "password": "supersecurepassword1"})
+    token = register.json()["access_token"]
+    user_id = uuid.UUID(register.json()["user"]["id"])
+
+    await _seed_catalog(db_session, _model("acme/primary", quality=1.0), _model("acme/backup", quality=0.5))
+    job = await vg_service.create_video_job(
+        db_session, user_id, generation_type=VideoGenerationType.TEXT_TO_VIDEO, prompt="x",
+    )
+
+    resp = await client.get(f"/api/v1/video/jobs/{job.id}/routing", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["primary_model_id"] == "acme/primary"
+    assert body["remaining_fallback_chain"] == ["acme/backup"]
+    assert body["fallback_used"] is False
+
+
+@pytest.mark.asyncio
+async def test_capabilities_and_health_endpoints_are_reachable(client, db_session):
+    email = f"video-caps-health-{uuid.uuid4().hex[:8]}@example.com"
+    register = await client.post("/api/v1/auth/register", json={"email": email, "password": "supersecurepassword1"})
+    token = register.json()["access_token"]
+    await _seed_catalog(db_session, _model("acme/only", resolutions=["720p"]))
+
+    caps_resp = await client.get("/api/v1/video/capabilities", headers={"Authorization": f"Bearer {token}"})
+    health_resp = await client.get("/api/v1/video/health", headers={"Authorization": f"Bearer {token}"})
+    assert caps_resp.status_code == 200, caps_resp.text
+    assert health_resp.status_code == 200, health_resp.text
+    assert "720p" in caps_resp.json()["resolutions"]
+    assert health_resp.json()["total_models"] >= 1

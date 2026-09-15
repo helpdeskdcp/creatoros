@@ -195,13 +195,16 @@ async def refresh_catalog(db: AsyncSession, settings: Settings | None = None) ->
 
 
 async def list_active_models(db: AsyncSession) -> list[VideoModelCatalogEntry]:
-    return list(
+    models = list(
         (
             await db.scalars(
                 select(VideoModelCatalogEntry).where(VideoModelCatalogEntry.is_active.is_(True))
             )
         ).all()
     )
+    if recover_expired_circuits(models):
+        await db.commit()
+    return models
 
 
 def record_success(row: VideoModelCatalogEntry, latency_ms: int, *, max_recent: int = 50) -> None:
@@ -223,3 +226,110 @@ def record_failure(row: VideoModelCatalogEntry, *, failure_threshold: int = 5) -
     if row.circuit_state == CircuitState.HALF_OPEN or row.consecutive_failures >= failure_threshold:
         row.circuit_state = CircuitState.OPEN
         row.circuit_opened_at = datetime.now(UTC)
+
+
+_CIRCUIT_COOLDOWN_SECONDS = 300  # 5 minutes
+
+
+def recover_expired_circuits(
+    models: list[VideoModelCatalogEntry], *, cooldown_seconds: int = _CIRCUIT_COOLDOWN_SECONDS
+) -> int:
+    """OPEN -> HALF_OPEN once the cooldown has elapsed since the circuit
+    tripped -- a single "controlled probe" (the next routing attempt that
+    reaches this model) decides CLOSED (record_success) or back to OPEN
+    (record_failure); nothing hammers a failing provider in a tight loop.
+    Called on every model list read right before routing (see
+    app.modules.video_generation.service.create_video_job and
+    submit_attempt) so the transition is always fresh, not dependent on a
+    separate scheduled task. Returns the number of models recovered, for
+    logging/observability."""
+    now = datetime.now(UTC)
+    recovered = 0
+    for row in models:
+        if (
+            row.circuit_state == CircuitState.OPEN
+            and row.circuit_opened_at is not None
+            and (now - row.circuit_opened_at).total_seconds() >= cooldown_seconds
+        ):
+            row.circuit_state = CircuitState.HALF_OPEN
+            recovered += 1
+    return recovered
+
+
+def mark_zdr_blocked(row: VideoModelCatalogEntry) -> None:
+    """Reactively records that this account's current OpenRouter workspace
+    guardrail rejects this model on privacy grounds (see
+    app.video.providers.openrouter_video.PrivacyPolicyViolationError) --
+    the only way this is ever knowable, since the catalog itself carries
+    no such field. Also counts as a failure for health/circuit-breaker
+    purposes: a policy-blocked model is exactly as unusable as a broken
+    one from the router's perspective, just for a different reason."""
+    row.known_zdr_blocked = True
+    row.zdr_blocked_at = datetime.now(UTC)
+    record_failure(row)
+
+
+async def get_health_summary(db: AsyncSession) -> dict:
+    """Section 18/22's admin/health view -- real counts from the DB, never
+    a fabricated "all systems operational"."""
+    all_rows = list((await db.scalars(select(VideoModelCatalogEntry))).all())
+    active = [m for m in all_rows if m.is_active]
+    return {
+        "total_models": len(all_rows),
+        "active_models": len(active),
+        "inactive_models": len(all_rows) - len(active),
+        "free_models": sum(1 for m in active if m.is_free),
+        "zdr_blocked_models": sum(1 for m in all_rows if m.known_zdr_blocked),
+        "circuit_breakers": {
+            "closed": sum(1 for m in active if m.circuit_state == CircuitState.CLOSED),
+            "open": sum(1 for m in active if m.circuit_state == CircuitState.OPEN),
+            "half_open": sum(1 for m in active if m.circuit_state == CircuitState.HALF_OPEN),
+        },
+    }
+
+
+def _safe_json_list(text: str | None) -> list:
+    """Same null-safety as app.video.router._loads (json.dumps(None) ==
+    the truthy string "null", which json.loads parses back to None, not
+    [])."""
+    if not text:
+        return []
+    value = json.loads(text)
+    return value if value is not None else []
+
+
+def get_capabilities_summary(models: list[VideoModelCatalogEntry]) -> dict:
+    """Aggregated across every active, non-ZDR-blocked model -- what a
+    caller can actually ask for right now, derived from live data rather
+    than a maintained list that drifts from the real catalog."""
+    resolutions: set[str] = set()
+    aspect_ratios: set[str] = set()
+    durations: set[int] = set()
+    generation_types: set[str] = set()
+    audio_capable = 0
+    for m in models:
+        if not m.is_active or m.known_zdr_blocked or m.circuit_state == CircuitState.OPEN:
+            continue
+        resolutions.update(_safe_json_list(m.supported_resolutions_json))
+        aspect_ratios.update(_safe_json_list(m.supported_aspect_ratios_json))
+        durations.update(_safe_json_list(m.supported_durations_json))
+        if m.supports_text_to_video:
+            generation_types.add("TEXT_TO_VIDEO")
+        if m.supports_image_reference:
+            generation_types.update(["IMAGE_TO_VIDEO", "REFERENCE_TO_VIDEO"])
+        frame_images = _safe_json_list(m.supported_frame_images_json)
+        if frame_images and "first_frame" in frame_images:
+            generation_types.add("FIRST_FRAME")
+        if frame_images and "last_frame" in frame_images:
+            generation_types.add("LAST_FRAME")
+        if frame_images and "first_frame" in frame_images and "last_frame" in frame_images:
+            generation_types.add("FIRST_LAST_FRAME")
+        if m.supports_audio:
+            audio_capable += 1
+    return {
+        "resolutions": sorted(resolutions),
+        "aspect_ratios": sorted(aspect_ratios),
+        "durations": sorted(durations),
+        "generation_types": sorted(generation_types),
+        "audio_capable_model_count": audio_capable,
+    }

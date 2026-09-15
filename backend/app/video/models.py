@@ -71,6 +71,21 @@ class VideoModelCatalogEntry(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     last_checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
+    # OpenRouter exposes no per-model "is this ZDR-compliant" field in the
+    # catalog -- the ONLY way to learn this is empirically, from a real
+    # submission being rejected with its workspace-guardrail error. Set to
+    # True the first time that happens (see
+    # app.video.providers.openrouter_video.PrivacyPolicyViolationError and
+    # service._advance_to_next_model_or_fail) so future routing decisions
+    # skip a known-blocked model without wasting an attempt on it. This is
+    # a live, reactive record of THIS account's current guardrail
+    # configuration, not a claim about the provider's actual ZDR support --
+    # if the workspace guardrail changes, last_checked_at/zdr_blocked_at
+    # aging plus a manual reset (or a future re-probe policy) is how it
+    # would need to be cleared.
+    known_zdr_blocked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    zdr_blocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # --- Health / circuit breaker (see app.video.catalog.record_success/
     # record_failure) ---
     success_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

@@ -61,6 +61,20 @@ class RateLimitedError(AIProviderError):
     moves straight to a fallback provider (if any) instead of retrying."""
 
 
+class PrivacyPolicyViolationError(AIProviderError):
+    """The request was rejected by the workspace/account's own data-privacy
+    guardrail (observed in production as OpenRouter's "Zero Data Retention"
+    policy: a 404 whose body names a "ZDR violation (guardrail)"), not by
+    the model itself being unavailable. Distinct from ModelNotAvailableError
+    because the fix is different -- the operator must review their privacy
+    policy configuration, not wait for the model to come back. This is a
+    genuine safety signal, never something a caller should try to route
+    around: it must never be retried against the same model, and callers
+    must never fabricate a workaround or expose the raw provider policy
+    text to an end user (see app.video.service's clean ZDR_POLICY_BLOCKED
+    error code)."""
+
+
 class AIProvider(ABC):
     name: str
 

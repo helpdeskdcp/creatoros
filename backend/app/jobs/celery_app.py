@@ -85,4 +85,8 @@ celery_app.conf.beat_schedule = {
         "task": "app.jobs.tasks.refresh_video_model_catalog_task",
         "schedule": 1800.0,
     },
+    "reconcile-stuck-video-jobs": {
+        "task": "app.jobs.tasks.reconcile_stuck_video_jobs_task",
+        "schedule": 300.0,
+    },
 }

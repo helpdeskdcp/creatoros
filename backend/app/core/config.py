@@ -101,6 +101,18 @@ class Settings(BaseSettings):
     # stale and regenerated -- see app/ai/cache.py.
     ai_cache_ttl_hours: int = 24
 
+    # --- Video generation (app/video, app/modules/video_generation) ---
+    # A global safety net, not a per-user/per-plan billing feature (that
+    # would need its own settings table, like publishing's per-channel
+    # PublishingRule.max_videos_per_day) -- caps how much a single user can
+    # commit to spending on real, billable video generation in a rolling
+    # 24h window. create_video_job() sums cost_actual (completed) +
+    # cost_estimate (still in flight) for that user's jobs in the last 24h
+    # and refuses a new job that would exceed this.
+    video_daily_cost_limit_usd: float = 5.0
+    video_max_duration_seconds: int = 30
+    video_max_concurrent_jobs_per_user: int = 3
+
     # --- Billing ---
     billing_provider: str = "none"  # "none" (default -- CONFIGURATION_REQUIRED) or "stripe"
 

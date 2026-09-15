@@ -13,13 +13,14 @@ import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.providers.base import (
     AIProviderError,
     AIProviderUnavailableError,
     ModelNotAvailableError,
+    PrivacyPolicyViolationError,
     RateLimitedError,
 )
 from app.core.config import Settings, get_settings
@@ -37,17 +38,46 @@ from app.modules.video_generation.models import (
 from app.video import catalog as catalog_module
 from app.video.providers.openrouter_video import OpenRouterVideoProvider
 from app.video.qc import run_qc
-from app.video.router import NoCompatibleModelError, ResolvedSelection, VideoRequest, select_best_model
+from app.video.router import (
+    NoCompatibleModelError,
+    ResolvedSelection,
+    VideoRequest,
+    estimate_cost,
+    select_best_model,
+)
 
 logger = get_logger("video.generation")
 
 _MAX_RETRIES_PER_MODEL = 2
 _BASE_BACKOFF_S = 30
 _MAX_BACKOFF_S = 600
+# Section 11/12: no job may remain silently stuck forever. A job whose
+# initial Celery dispatch was lost (process crash, broker hiccup between
+# the DB commit and .delay()) sits in QUEUED with nothing ever advancing
+# it -- reconcile_stuck_jobs() finds these. A job whose poll endpoint has
+# been erroring for longer than this is escalated rather than polled
+# forever (see poll_and_progress_jobs).
+_STUCK_QUEUED_TIMEOUT_S = 300  # 5 minutes
+_STUCK_POLL_TIMEOUT_S = 1200  # 20 minutes
 # Errors where retrying the SAME model won't help -- escalate to the next
 # fallback model immediately instead of burning retry budget on it. Same
 # classification policy as app.ai.orchestrator's _NON_RETRYABLE_ON_SAME_PROVIDER.
-_NON_RETRYABLE_ON_SAME_MODEL = (AIProviderUnavailableError, ModelNotAvailableError, RateLimitedError)
+_NON_RETRYABLE_ON_SAME_MODEL = (
+    AIProviderUnavailableError, ModelNotAvailableError, RateLimitedError, PrivacyPolicyViolationError,
+)
+# A distinct, clean, user-safe error code -- surfaced instead of a raw
+# per-attempt provider message when EVERY model in the fallback chain
+# failed for the SAME reason: this account's OpenRouter workspace privacy
+# (Zero Data Retention) policy. Section 7/15: never expose the raw
+# provider guardrail text to a caller; this is the honest, actionable
+# replacement for it.
+ZDR_POLICY_BLOCKED_ERROR_CODE = "ZDR_POLICY_BLOCKED"
+ZDR_POLICY_BLOCKED_MESSAGE = (
+    "Video generation is currently blocked by this workspace's OpenRouter "
+    "privacy policy (Zero Data Retention guardrail), which rejected every "
+    "compatible model. An administrator can review this at "
+    "openrouter.ai/workspaces/default/guardrails."
+)
 
 
 def _backoff_seconds(attempt: int) -> float:
@@ -55,11 +85,47 @@ def _backoff_seconds(attempt: int) -> float:
     return base + random.uniform(0, base * 0.25)
 
 
-async def _get_owned_job(db: AsyncSession, job_id: uuid.UUID, owner_user_id: uuid.UUID) -> VideoJob:
+async def get_owned_job(db: AsyncSession, job_id: uuid.UUID, owner_user_id: uuid.UUID) -> VideoJob:
     job = await db.get(VideoJob, job_id)
     if not job or job.owner_user_id != owner_user_id:
         raise NotFoundError("Video job not found")
     return job
+
+
+_IN_FLIGHT_STATUSES = (
+    AIVideoJobStatus.QUEUED, AIVideoJobStatus.SUBMITTED,
+    AIVideoJobStatus.PROCESSING, AIVideoJobStatus.RETRYING,
+)
+
+
+async def _enforce_concurrency_limit(db: AsyncSession, owner_user_id: uuid.UUID, settings: Settings) -> None:
+    in_flight = await db.scalar(
+        select(func.count()).select_from(VideoJob).where(
+            VideoJob.owner_user_id == owner_user_id, VideoJob.status.in_(_IN_FLIGHT_STATUSES)
+        )
+    )
+    if (in_flight or 0) >= settings.video_max_concurrent_jobs_per_user:
+        raise ValidationError(
+            f"You already have {in_flight} video generation job(s) in progress "
+            f"(limit: {settings.video_max_concurrent_jobs_per_user}). Wait for one to finish before starting another."
+        )
+
+
+async def _enforce_daily_cost_limit(
+    db: AsyncSession, owner_user_id: uuid.UUID, settings: Settings, *, additional_cost: float
+) -> None:
+    since = datetime.now(UTC) - timedelta(hours=24)
+    rows = (
+        await db.scalars(
+            select(VideoJob).where(VideoJob.owner_user_id == owner_user_id, VideoJob.created_at >= since)
+        )
+    ).all()
+    spent = sum((j.cost_actual if j.cost_actual is not None else (j.cost_estimate or 0.0)) for j in rows)
+    if spent + additional_cost > settings.video_daily_cost_limit_usd:
+        raise ValidationError(
+            f"This request (~${additional_cost:.2f}) would exceed your daily video generation limit "
+            f"(${settings.video_daily_cost_limit_usd:.2f}/24h, ${spent:.2f} already used)."
+        )
 
 
 async def create_video_job(
@@ -81,6 +147,13 @@ async def create_video_job(
     fallback chain already resolved. Raises ValidationError if genuinely
     nothing in the catalog can satisfy the request, even degraded --
     never creates a job doomed to submit an invalid configuration."""
+    settings = get_settings()
+    if duration and duration > settings.video_max_duration_seconds:
+        raise ValidationError(
+            f"Requested duration {duration}s exceeds the maximum allowed ({settings.video_max_duration_seconds}s)"
+        )
+    await _enforce_concurrency_limit(db, owner_user_id, settings)
+
     catalog = await catalog_module.list_active_models(db)
     request = VideoRequest(
         generation_type=generation_type,
@@ -95,6 +168,17 @@ async def create_video_job(
         selection: ResolvedSelection = select_best_model(catalog, request)
     except NoCompatibleModelError as exc:
         raise ValidationError(str(exc)) from exc
+
+    primary_row = next((m for m in catalog if m.model_id == selection.primary_model_id), None)
+    cost_estimate = None
+    if primary_row is not None:
+        vp = selection.validated_params
+        cost_request = VideoRequest(
+            generation_type=generation_type, duration=vp.get("duration"),
+            resolution=vp.get("resolution"), aspect_ratio=vp.get("aspect_ratio"), audio=bool(vp.get("audio")),
+        )
+        cost_estimate = estimate_cost(primary_row, cost_request)
+    await _enforce_daily_cost_limit(db, owner_user_id, settings, additional_cost=cost_estimate or 0.0)
 
     job = VideoJob(
         owner_user_id=owner_user_id,
@@ -112,6 +196,7 @@ async def create_video_job(
         fallback_chain_json=json.dumps(selection.fallback_chain),
         selected_model_id=selection.primary_model_id,
         status=AIVideoJobStatus.QUEUED,
+        cost_estimate=cost_estimate,
         resolution=selection.validated_params.get("resolution"),
         aspect_ratio=selection.validated_params.get("aspect_ratio"),
         duration_seconds=selection.validated_params.get("duration"),
@@ -203,7 +288,10 @@ async def submit_attempt(db: AsyncSession, job: VideoJob, settings: Settings | N
             "video_submission_attempt_failed", job_id=str(job.id), model=model_id,
             attempt=job.attempt, error_code=error_code, error=str(exc),
         )
-        await _record_catalog_outcome(db, model_id, success=False)
+        if isinstance(exc, PrivacyPolicyViolationError):
+            await _record_zdr_block(db, model_id)
+        else:
+            await _record_catalog_outcome(db, model_id, success=False)
         can_retry_same_model = (
             same_model_attempts < _MAX_RETRIES_PER_MODEL and not isinstance(exc, _NON_RETRYABLE_ON_SAME_MODEL)
         )
@@ -240,9 +328,18 @@ async def _advance_to_next_model_or_fail(
         job.status = AIVideoJobStatus.FAILED
         job.error = error_message
         job.error_code = error_code
+        if await _all_attempts_zdr_blocked(db, job.id):
+            # Every single model in the chain failed for the identical
+            # privacy-policy reason -- collapse the (accurate but noisy)
+            # per-attempt provider message into one clean, actionable
+            # error rather than surfacing the last model's raw text.
+            job.error = ZDR_POLICY_BLOCKED_MESSAGE
+            job.error_code = ZDR_POLICY_BLOCKED_ERROR_CODE
         job.completed_at = datetime.now(UTC)
         await db.commit()
-        logger.error("video_job_failed_all_models", job_id=str(job.id), final_error=error_message)
+        logger.error(
+            "video_job_failed_all_models", job_id=str(job.id), final_error=job.error, error_code=job.error_code
+        )
         return
 
     next_model = chain.pop(0)
@@ -270,6 +367,28 @@ async def _record_catalog_outcome(
     else:
         catalog_module.record_failure(row)
     await db.commit()
+
+
+async def _record_zdr_block(db: AsyncSession, model_id: str) -> None:
+    row = await db.scalar(select(catalog_module.VideoModelCatalogEntry).where(
+        catalog_module.VideoModelCatalogEntry.model_id == model_id
+    ))
+    if row is None:
+        return
+    catalog_module.mark_zdr_blocked(row)
+    await db.commit()
+    logger.warning("video_model_zdr_blocked", model=model_id)
+
+
+async def _all_attempts_zdr_blocked(db: AsyncSession, job_id: uuid.UUID) -> bool:
+    attempts = (
+        await db.scalars(
+            select(VideoGenerationAttempt).where(
+                VideoGenerationAttempt.video_job_id == job_id, VideoGenerationAttempt.outcome == "failed"
+            )
+        )
+    ).all()
+    return bool(attempts) and all(a.error_code == "PrivacyPolicyViolationError" for a in attempts)
 
 
 async def poll_and_progress_jobs(db: AsyncSession, settings: Settings | None = None) -> dict:
@@ -307,6 +426,19 @@ async def poll_and_progress_jobs(db: AsyncSession, settings: Settings | None = N
             result = await provider.poll_job(job.provider_job_id)
         except AIProviderError as exc:
             logger.warning("video_poll_failed", job_id=str(job.id), error=str(exc))
+            # A transient poll failure just waits for the next sweep --
+            # but if polling has been failing for this job long enough
+            # that it would otherwise sit here forever (section 12: no job
+            # may remain silently stuck), escalate to the next fallback
+            # model instead of continuing to retry an unreachable poll
+            # endpoint indefinitely.
+            reference_time = job.submitted_at or job.created_at
+            if (now - reference_time).total_seconds() > _STUCK_POLL_TIMEOUT_S:
+                await _advance_to_next_model_or_fail(
+                    db, job, error_code=type(exc).__name__,
+                    error_message=f"Polling failed repeatedly for over {_STUCK_POLL_TIMEOUT_S // 60} minutes: {exc}",
+                )
+                summary["failed"] += 1
             continue
 
         if result.status in ("pending", "in_progress"):
@@ -342,6 +474,26 @@ async def poll_and_progress_jobs(db: AsyncSession, settings: Settings | None = N
         summary["failed"] += 1
 
     return summary
+
+
+async def find_stuck_queued_job_ids(db: AsyncSession) -> list[str]:
+    """Section 12's reconciliation for the specific failure mode this
+    session's own live testing surfaced: a QUEUED job whose Celery
+    submission task never ran (dispatch lost) sits untouched forever,
+    since nothing else ever looks at QUEUED jobs. Returns ids for the
+    Celery task to redispatch -- kept as a plain lookup (not a mutation)
+    so it has no circular import on app.jobs.tasks, matching the existing
+    claim_due_scheduled_run_ids / poll_scheduled_publishing_runs_task
+    split in app.modules.publishing."""
+    cutoff = datetime.now(UTC) - timedelta(seconds=_STUCK_QUEUED_TIMEOUT_S)
+    stuck = (
+        await db.scalars(
+            select(VideoJob).where(VideoJob.status == AIVideoJobStatus.QUEUED, VideoJob.created_at < cutoff)
+        )
+    ).all()
+    if stuck:
+        logger.warning("video_jobs_stuck_in_queued", count=len(stuck), job_ids=[str(j.id) for j in stuck])
+    return [str(j.id) for j in stuck]
 
 
 async def _finalize_completed_job(db: AsyncSession, job: VideoJob, result, settings: Settings) -> None:

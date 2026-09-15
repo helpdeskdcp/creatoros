@@ -132,6 +132,12 @@ def passes_hard_gate(model: VideoModelCatalogEntry, request: VideoRequest) -> bo
         return False
     if model.circuit_state == CircuitState.OPEN:
         return False
+    if model.known_zdr_blocked:
+        # Section 7: never spend an attempt re-submitting to a model this
+        # account's own OpenRouter workspace guardrail has already
+        # rejected on privacy grounds -- that's wasted latency for a
+        # request that cannot succeed, not a retryable condition.
+        return False
     if not _supports_generation_type(model, request.generation_type):
         return False
     if request.resolution:
@@ -175,7 +181,7 @@ def p95_latency_ms(model: VideoModelCatalogEntry) -> float | None:
     return float(latencies[idx])
 
 
-def _estimate_cost(model: VideoModelCatalogEntry, request: VideoRequest) -> float:
+def estimate_cost(model: VideoModelCatalogEntry, request: VideoRequest) -> float:
     """A relative cost estimate for ranking purposes, not a billing
     quote -- pricing_skus shapes vary per provider (per-second, per-token,
     per-image, resolution-tiered), so this picks whichever numeric SKU
@@ -207,7 +213,7 @@ def _is_number(v) -> bool:
 def _cost_score(model: VideoModelCatalogEntry, request: VideoRequest, max_cost: float) -> float:
     if max_cost <= 0:
         return 1.0
-    cost = _estimate_cost(model, request)
+    cost = estimate_cost(model, request)
     return max(0.0, 1.0 - cost / max_cost)
 
 
@@ -253,7 +259,7 @@ def score_model(
     See module docstring for the two-phase gate-then-score design and
     _WEIGHTS for the per-priority-mode weight vectors."""
     weights = _WEIGHTS[request.priority_mode]
-    max_cost = max((_estimate_cost(m, request) for m in candidates), default=0.0)
+    max_cost = max((estimate_cost(m, request) for m in candidates), default=0.0)
     return (
         weights["quality"] * model.quality_tier_score
         + weights["resolution"] * _resolution_match_score(model, request)
@@ -317,6 +323,31 @@ def _closest_valid_config(
     return None
 
 
+def _no_compatible_model_message(pool: list[VideoModelCatalogEntry], request: VideoRequest) -> str:
+    """A clean, specific reason instead of a generic "nothing available" --
+    section 26: don't hide the actual blocker. Distinguishes "every
+    capability-matching model happens to be blocked by this workspace's
+    privacy policy" (an operator-actionable, external condition) from a
+    genuine capability gap (no model exists that could ever satisfy this)."""
+
+    def matches_without_zdr_check(m: VideoModelCatalogEntry) -> bool:
+        saved = m.known_zdr_blocked
+        m.known_zdr_blocked = False
+        try:
+            return passes_hard_gate(m, request)
+        finally:
+            m.known_zdr_blocked = saved
+
+    would_match_but_zdr_blocked = [m for m in pool if m.known_zdr_blocked and matches_without_zdr_check(m)]
+    if would_match_but_zdr_blocked:
+        return (
+            f"{len(would_match_but_zdr_blocked)} model(s) could otherwise satisfy this request but are "
+            "blocked by this workspace's OpenRouter privacy policy (Zero Data Retention guardrail). "
+            "An administrator can review this at openrouter.ai/workspaces/default/guardrails."
+        )
+    return "No available model can satisfy this request even with degraded parameters"
+
+
 def select_best_model(
     catalog: list[VideoModelCatalogEntry], request: VideoRequest
 ) -> ResolvedSelection:
@@ -341,9 +372,7 @@ def select_best_model(
             )
         resolved = _closest_valid_config(pool, request)
         if resolved is None:
-            raise NoCompatibleModelError(
-                "No available model can satisfy this request even with degraded parameters"
-            )
+            raise NoCompatibleModelError(_no_compatible_model_message(pool, request))
         effective_request, notes = resolved
         exact_matches = [m for m in pool if passes_hard_gate(m, effective_request)]
 

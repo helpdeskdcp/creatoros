@@ -13,6 +13,7 @@ from app.ai.providers.base import (
     AIProviderError,
     AIProviderUnavailableError,
     ModelNotAvailableError,
+    PrivacyPolicyViolationError,
     RateLimitedError,
 )
 from app.core.config import Settings
@@ -144,11 +145,35 @@ class OpenRouterVideoProvider:
     def _raise_for_status(self, resp: httpx.Response, *, model: str | None) -> None:
         if resp.status_code in (200, 202):
             return
+        if resp.status_code == 404:
+            # OpenRouter's workspace-guardrail rejection (observed live:
+            # Zero Data Retention policy blocking every endpoint for a
+            # model) is ALSO a 404, but means something completely
+            # different from "this model id doesn't exist" -- it's a
+            # privacy-policy decision, not an availability fact, and must
+            # never be treated or retried the same way. Distinguish by the
+            # documented response shape (metadata.ineligibility_reasons
+            # naming a guardrail reason) rather than string-matching the
+            # human-readable message, which OpenRouter could reword.
+            if self._is_guardrail_rejection(resp):
+                raise PrivacyPolicyViolationError(
+                    f"Model '{model}' was rejected by this workspace's privacy/guardrail policy"
+                    if model else "Video job lookup rejected by workspace privacy/guardrail policy"
+                )
         if resp.status_code not in (404, 429, 401, 403, 402):
             raise AIProviderError(
                 f"OpenRouter video API returned {resp.status_code}: {self._redact(resp.text)}"
             )
         self._raise_for_status_code(resp.status_code, resp.headers, model=model)
+
+    @staticmethod
+    def _is_guardrail_rejection(resp: httpx.Response) -> bool:
+        try:
+            body = resp.json()
+        except ValueError:
+            return False
+        reasons = (((body or {}).get("error") or {}).get("metadata") or {}).get("ineligibility_reasons") or []
+        return any("guardrail" in str(r.get("reason", "")).lower() for r in reasons if isinstance(r, dict))
 
     def _raise_for_status_code(self, status_code: int, headers, *, model: str | None) -> None:
         """Status-only variant safe to call on a not-yet-read streamed
