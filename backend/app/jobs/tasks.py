@@ -602,13 +602,19 @@ def refresh_video_model_catalog_task():
     """Live model discovery (section 20): re-fetches GET /videos/models
     and reconciles against video_model_catalog -- new models appear with
     zero code changes, models that stopped appearing are marked inactive
-    (never deleted), changed capabilities are updated in place."""
+    (never deleted), changed capabilities are updated in place. Also
+    reconciles the single config-driven NVIDIA row (see
+    app.video.catalog.refresh_nvidia_catalog) so enabling/disabling
+    NVIDIA_VIDEO_ENABLED takes effect on the same schedule, without a
+    separate beat entry."""
     async def _do():
         async with _tracked_job("refresh_video_model_catalog_task") as result:
             async with WorkerSessionLocal() as db:
-                from app.video.catalog import refresh_catalog
+                from app.video.catalog import refresh_catalog, refresh_nvidia_catalog
 
-                result["value"] = await refresh_catalog(db)
+                openrouter_summary = await refresh_catalog(db)
+                nvidia_summary = await refresh_nvidia_catalog(db)
+                result["value"] = {"openrouter": openrouter_summary, "nvidia": nvidia_summary}
         return result["value"]
 
     return _run(_do())

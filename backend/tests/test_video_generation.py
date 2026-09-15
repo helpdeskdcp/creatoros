@@ -11,6 +11,7 @@ the transport layer so CI never makes a real network call or spends real
 money on video generation.
 """
 import json
+import os
 import subprocess
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -41,9 +42,11 @@ from app.modules.video_generation.models import (
 )
 from app.video import catalog as catalog_module
 from app.video.models import CircuitState, VideoModelCatalogEntry
+from app.video.providers.nvidia_video import NVIDIAVideoProvider
 from app.video.providers.openrouter_video import OpenRouterVideoProvider, VideoGenerationJobResult
 from app.video.qc import run_qc
 from app.video.router import (
+    CostVerificationRequiredError,
     NoCompatibleModelError,
     NoFreeVideoModelError,
     VideoRequest,
@@ -59,8 +62,14 @@ def _model(
     *,
     resolutions=None, aspect_ratios=None, durations=None, frame_images=None,
     audio=False, is_free=False, is_active=True, circuit_state=CircuitState.CLOSED,
-    quality=0.6, pricing=None,
+    quality=0.6, pricing=None, pricing_status=None, fallback_priority=None,
 ) -> VideoModelCatalogEntry:
+    # Mirrors app.video.catalog.normalize_model's real derivation (FREE iff
+    # is_free, else PAID) unless a test explicitly overrides it -- so every
+    # existing test that never mentions pricing_status keeps behaving
+    # exactly as it did before this field existed.
+    if pricing_status is None:
+        pricing_status = "FREE" if is_free else "PAID"
     return VideoModelCatalogEntry(
         model_id=model_id, name=model_id, provider=model_id.split("/")[0],
         description="A video generation model for text-to-video and image-to-video.",
@@ -70,6 +79,7 @@ def _model(
         supported_frame_images_json=json.dumps(frame_images) if frame_images is not None else None,
         supports_audio=audio, supports_image_reference=True, supports_text_to_video=True,
         pricing_skus_json=json.dumps(pricing or {}), is_free=is_free,
+        pricing_status=pricing_status, fallback_priority=fallback_priority,
         quality_tier_score=quality, is_active=is_active, circuit_state=circuit_state,
         last_checked_at=datetime.now(UTC),
         # SQLAlchemy column defaults (default=0) only apply once a row is
@@ -475,6 +485,68 @@ def test_degraded_config_disabled_raises_instead_of_silently_downgrading():
         select_best_model([model_720p], req)
 
 
+# ---------------------------------------------------------------------------
+# Cost safety: pricing_status="UNKNOWN" models (e.g. an unconfirmed NVIDIA
+# endpoint) must never be auto-selected, under ANY priority_mode
+# ---------------------------------------------------------------------------
+
+def test_cost_verification_required_when_only_unverified_model_available():
+    unverified = _model("nvidia/cosmos3-nano", pricing_status="UNKNOWN")
+    req = VideoRequest(generation_type=VideoGenerationType.TEXT_TO_VIDEO)
+    with pytest.raises(CostVerificationRequiredError):
+        select_best_model([unverified], req)
+
+
+def test_unverified_model_ignored_when_a_verified_alternative_exists():
+    # UNKNOWN pricing must exclude the model entirely, not just deprioritize
+    # it -- the verified PAID model must be selected with no error at all.
+    unverified = _model("nvidia/cosmos3-nano", pricing_status="UNKNOWN", quality=1.0, fallback_priority=0)
+    verified = _model("acme/paid", pricing_status="PAID", quality=0.2)
+    req = VideoRequest(generation_type=VideoGenerationType.TEXT_TO_VIDEO)
+    selection = select_best_model([unverified, verified], req)
+    assert selection.primary_model_id == "acme/paid"
+    assert "nvidia/cosmos3-nano" not in selection.fallback_chain
+
+
+def test_free_first_with_paid_fallback_still_blocks_on_unverified_pricing():
+    # FREE_FIRST's own hard guard (no free model, no permission) must not
+    # be confused with cost verification -- but once allow_paid_fallback
+    # widens the search, an UNKNOWN-priced model must still be excluded
+    # rather than silently used just because permission was granted for
+    # PAID models.
+    unverified = _model("nvidia/cosmos3-nano", pricing_status="UNKNOWN")
+    req = VideoRequest(
+        generation_type=VideoGenerationType.TEXT_TO_VIDEO,
+        priority_mode=VideoPriorityMode.FREE_FIRST, allow_paid_fallback=True,
+    )
+    with pytest.raises(CostVerificationRequiredError):
+        select_best_model([unverified], req)
+
+
+# ---------------------------------------------------------------------------
+# fallback_priority: an explicit provider-priority tier (e.g. NVIDIA-first)
+# ---------------------------------------------------------------------------
+
+def test_fallback_priority_wins_over_score_for_verified_models():
+    high_priority_low_score = _model("nvidia/cosmos3-nano", quality=0.1, fallback_priority=0)
+    no_priority_high_score = _model("acme/best", quality=1.0, fallback_priority=None)
+    req = VideoRequest(generation_type=VideoGenerationType.TEXT_TO_VIDEO)
+    selection = select_best_model([no_priority_high_score, high_priority_low_score], req)
+    assert selection.primary_model_id == "nvidia/cosmos3-nano"
+    assert selection.fallback_chain == ["acme/best"]
+
+
+def test_models_without_explicit_fallback_priority_still_rank_by_score():
+    # Regression guard: every OpenRouter row leaves fallback_priority unset
+    # -- their relative order must be identical to before this field
+    # existed, purely score_model-driven.
+    high_quality = _model("acme/high", quality=1.0)
+    low_quality = _model("acme/low", quality=0.2)
+    req = VideoRequest(generation_type=VideoGenerationType.TEXT_TO_VIDEO, priority_mode=VideoPriorityMode.QUALITY)
+    selection = select_best_model([low_quality, high_quality], req)
+    assert selection.primary_model_id == "acme/high"
+
+
 def test_open_circuit_model_excluded_from_selection():
     open_model = _model("acme/broken", circuit_state=CircuitState.OPEN)
     closed_model = _model("acme/ok", circuit_state=CircuitState.CLOSED)
@@ -658,6 +730,213 @@ async def test_api_key_never_appears_in_error_messages(monkeypatch):
         with pytest.raises(AIProviderError) as exc_info:
             await provider.submit_job({"model": "x"})
         assert FAKE_KEY not in str(exc_info.value), f"leaked at status {status}"
+
+
+# ---------------------------------------------------------------------------
+# NVIDIA video provider: synchronous /v1/infer wrapped to fit the same
+# submit_job/poll_job/download_content shape as OpenRouterVideoProvider
+# ---------------------------------------------------------------------------
+
+def _settings_with_nvidia(tmp_path, *, model="cosmos3-nano"):
+    settings = get_settings()
+    settings.nvidia_api_key = FAKE_KEY
+    settings.nvidia_video_model = model
+    settings.nvidia_video_enabled = True
+    settings.storage_local_path = str(tmp_path)
+    return settings
+
+
+@pytest.mark.asyncio
+async def test_nvidia_submit_job_decodes_and_saves_video_synchronously(monkeypatch, tmp_path):
+    import base64
+
+    video_bytes = b"fake-mp4-bytes"
+    monkeypatch.setattr(
+        "app.video.providers.nvidia_video.httpx.AsyncClient",
+        lambda **kw: _FakeVideoAsyncClient(_FakeResponse(200, {
+            "b64_video": base64.b64encode(video_bytes).decode(), "seed": 42,
+        })),
+    )
+    provider = NVIDIAVideoProvider(_settings_with_nvidia(tmp_path))
+    result = await provider.submit_job({"prompt": "a cat playing piano"})
+
+    assert result.status == "pending"
+    assert result.provider_job_id
+    scratch_path = provider._scratch_path(result.provider_job_id)
+    with open(scratch_path, "rb") as f:
+        assert f.read() == video_bytes
+
+
+@pytest.mark.asyncio
+async def test_nvidia_poll_job_reports_completed_once_scratch_file_exists(monkeypatch, tmp_path):
+    import base64
+
+    monkeypatch.setattr(
+        "app.video.providers.nvidia_video.httpx.AsyncClient",
+        lambda **kw: _FakeVideoAsyncClient(_FakeResponse(200, {"b64_video": base64.b64encode(b"x").decode()})),
+    )
+    provider = NVIDIAVideoProvider(_settings_with_nvidia(tmp_path))
+    submitted = await provider.submit_job({"prompt": "x"})
+    polled = await provider.poll_job(submitted.provider_job_id)
+    assert polled.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_nvidia_poll_job_reports_failed_when_no_scratch_file_exists(tmp_path):
+    provider = NVIDIAVideoProvider(_settings_with_nvidia(tmp_path))
+    polled = await provider.poll_job("nonexistent-job-id")
+    assert polled.status == "failed"
+    assert polled.error
+
+
+@pytest.mark.asyncio
+async def test_nvidia_download_content_moves_scratch_file_to_destination(monkeypatch, tmp_path):
+    import base64
+
+    video_bytes = b"fake-mp4-bytes-for-download"
+    monkeypatch.setattr(
+        "app.video.providers.nvidia_video.httpx.AsyncClient",
+        lambda **kw: _FakeVideoAsyncClient(_FakeResponse(200, {"b64_video": base64.b64encode(video_bytes).decode()})),
+    )
+    provider = NVIDIAVideoProvider(_settings_with_nvidia(tmp_path))
+    submitted = await provider.submit_job({"prompt": "x"})
+    scratch_path = provider._scratch_path(submitted.provider_job_id)
+
+    dest_path = str(tmp_path / "final_output.mp4")
+    written = await provider.download_content(submitted.provider_job_id, dest_path)
+
+    assert written == len(video_bytes)
+    with open(dest_path, "rb") as f:
+        assert f.read() == video_bytes
+    assert not os.path.exists(scratch_path)  # moved, not copied -- never leaks scratch files
+
+
+@pytest.mark.asyncio
+async def test_nvidia_submit_job_timeout_raises_typed_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "app.video.providers.nvidia_video.httpx.AsyncClient",
+        lambda **kw: _FakeVideoAsyncClient(raise_exc=httpx.ReadTimeout("timed out")),
+    )
+    provider = NVIDIAVideoProvider(_settings_with_nvidia(tmp_path))
+    with pytest.raises(AIGenerationTimeoutError):
+        await provider.submit_job({"prompt": "x"})
+
+
+@pytest.mark.asyncio
+async def test_nvidia_submit_job_rate_limited_raises_typed_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "app.video.providers.nvidia_video.httpx.AsyncClient",
+        lambda **kw: _FakeVideoAsyncClient(_FakeResponse(429, text="rate limited")),
+    )
+    provider = NVIDIAVideoProvider(_settings_with_nvidia(tmp_path))
+    with pytest.raises(RateLimitedError):
+        await provider.submit_job({"prompt": "x"})
+
+
+@pytest.mark.asyncio
+async def test_nvidia_submit_job_insufficient_credits_raises_typed_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "app.video.providers.nvidia_video.httpx.AsyncClient",
+        lambda **kw: _FakeVideoAsyncClient(_FakeResponse(402, text="insufficient quota")),
+    )
+    provider = NVIDIAVideoProvider(_settings_with_nvidia(tmp_path))
+    with pytest.raises(InsufficientCreditsError):
+        await provider.submit_job({"prompt": "x"})
+
+
+@pytest.mark.asyncio
+async def test_nvidia_missing_model_never_makes_a_request(monkeypatch, tmp_path):
+    called = {"value": False}
+
+    def _fail(**kw):
+        called["value"] = True
+        return _FakeVideoAsyncClient()
+
+    monkeypatch.setattr("app.video.providers.nvidia_video.httpx.AsyncClient", _fail)
+    settings = _settings_with_nvidia(tmp_path)
+    settings.nvidia_video_model = ""
+    provider = NVIDIAVideoProvider(settings)
+    with pytest.raises(AIProviderUnavailableError):
+        await provider.submit_job({"prompt": "x"})
+    assert called["value"] is False
+
+
+@pytest.mark.asyncio
+async def test_nvidia_api_key_never_appears_in_error_messages(monkeypatch, tmp_path):
+    for status in (401, 403, 429, 500):
+        client = _FakeVideoAsyncClient(_FakeResponse(status, text=f"Bearer {FAKE_KEY} leaked in body"))
+        monkeypatch.setattr(
+            "app.video.providers.nvidia_video.httpx.AsyncClient", lambda c=client, **kw: c
+        )
+        provider = NVIDIAVideoProvider(_settings_with_nvidia(tmp_path))
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.submit_job({"prompt": "x"})
+        assert FAKE_KEY not in str(exc_info.value), f"leaked at status {status}"
+
+
+# ---------------------------------------------------------------------------
+# Provider dispatch + NVIDIA catalog seeding
+# ---------------------------------------------------------------------------
+
+def test_provider_dispatch_routes_nvidia_namespace_to_nvidia_provider():
+    settings = get_settings()
+    assert isinstance(vg_service._provider_for_model_id("nvidia/cosmos3-nano", settings), NVIDIAVideoProvider)
+    assert isinstance(vg_service._provider_for_model_id("google/veo-3.1", settings), OpenRouterVideoProvider)
+
+
+@pytest.mark.asyncio
+async def test_refresh_nvidia_catalog_seeds_row_as_unknown_pricing_by_default(db_session):
+    settings = get_settings()
+    settings.nvidia_api_key = FAKE_KEY
+    settings.nvidia_video_model = "cosmos3-nano"
+    settings.nvidia_video_enabled = True
+    settings.nvidia_video_pricing_status = "UNKNOWN"
+
+    summary = await catalog_module.refresh_nvidia_catalog(db_session, settings)
+    assert summary["added"] == 1
+
+    row = await db_session.scalar(
+        select(VideoModelCatalogEntry).where(VideoModelCatalogEntry.model_id == "nvidia/cosmos3-nano")
+    )
+    assert row.pricing_status == "UNKNOWN"
+    assert row.is_free is False
+    assert row.fallback_priority == 0
+    assert row.is_active is True
+
+
+@pytest.mark.asyncio
+async def test_refresh_nvidia_catalog_deactivates_row_when_disabled(db_session):
+    settings = get_settings()
+    settings.nvidia_api_key = FAKE_KEY
+    settings.nvidia_video_model = "cosmos3-nano"
+    settings.nvidia_video_enabled = True
+    await catalog_module.refresh_nvidia_catalog(db_session, settings)
+
+    settings.nvidia_video_enabled = False
+    summary = await catalog_module.refresh_nvidia_catalog(db_session, settings)
+    assert summary["deactivated"] == 1
+
+    row = await db_session.scalar(
+        select(VideoModelCatalogEntry).where(VideoModelCatalogEntry.model_id == "nvidia/cosmos3-nano")
+    )
+    assert row.is_active is False
+
+
+@pytest.mark.asyncio
+async def test_refresh_nvidia_catalog_honors_operator_confirmed_pricing(db_session):
+    settings = get_settings()
+    settings.nvidia_api_key = FAKE_KEY
+    settings.nvidia_video_model = "cosmos3-nano"
+    settings.nvidia_video_enabled = True
+    settings.nvidia_video_pricing_status = "FREE"
+
+    await catalog_module.refresh_nvidia_catalog(db_session, settings)
+
+    row = await db_session.scalar(
+        select(VideoModelCatalogEntry).where(VideoModelCatalogEntry.model_id == "nvidia/cosmos3-nano")
+    )
+    assert row.pricing_status == "FREE"
+    assert row.is_free is True
 
 
 # ---------------------------------------------------------------------------

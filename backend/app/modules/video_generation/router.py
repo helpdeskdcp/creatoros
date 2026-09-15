@@ -25,7 +25,7 @@ from app.modules.video_generation.schemas import (
 )
 from app.video.catalog import get_capabilities_summary, get_health_summary, list_active_models
 from app.video.models import VideoModelCatalogEntry
-from app.video.router import NoFreeVideoModelError
+from app.video.router import CostVerificationRequiredError, NoFreeVideoModelError
 
 router = APIRouter()
 
@@ -86,6 +86,15 @@ async def create_video_job(
         return JSONResponse(
             status_code=200,
             content={"status": "NO_FREE_VIDEO_MODEL", "requires_credits": True, "paid_fallback_used": False},
+        )
+    except CostVerificationRequiredError as exc:
+        # A model (e.g. a configured NVIDIA endpoint) could otherwise
+        # satisfy this request, but this codebase has no confirmed
+        # free/paid signal for it -- never auto-submit against an unknown
+        # price. See app.video.router.CostVerificationRequiredError.
+        return JSONResponse(
+            status_code=200,
+            content={"status": "COST_VERIFICATION_REQUIRED", "requires_credits": None, "detail": str(exc)},
         )
 
     from app.jobs.tasks import submit_video_job_task
