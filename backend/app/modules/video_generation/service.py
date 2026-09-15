@@ -40,6 +40,7 @@ from app.video.providers.openrouter_video import OpenRouterVideoProvider
 from app.video.qc import run_qc
 from app.video.router import (
     NoCompatibleModelError,
+    NoFreeVideoModelError,
     ResolvedSelection,
     VideoRequest,
     estimate_cost,
@@ -141,12 +142,22 @@ async def create_video_job(
     audio: bool = False,
     input_references: list[str] | None = None,
     allow_degraded_config: bool = True,
+    allow_paid_fallback: bool = False,
 ) -> VideoJob:
     """Validates the request against the LIVE discovered catalog (never a
     hard-coded model list) and persists a QUEUED VideoJob with its full
     fallback chain already resolved. Raises ValidationError if genuinely
     nothing in the catalog can satisfy the request, even degraded --
-    never creates a job doomed to submit an invalid configuration."""
+    never creates a job doomed to submit an invalid configuration.
+
+    Raises NoFreeVideoModelError (NOT wrapped as ValidationError, NOT
+    caught here) when priority_mode=FREE_FIRST and allow_paid_fallback is
+    False but no free video model can satisfy the request -- the router
+    (app.modules.video_generation.router) catches this specifically to
+    return the {"status": "NO_FREE_VIDEO_MODEL", ...} contract instead of
+    a generic error envelope, and no VideoJob row is created for it (the
+    hard billing guard blocks the request itself, before any job/attempt
+    exists)."""
     settings = get_settings()
     if duration and duration > settings.video_max_duration_seconds:
         raise ValidationError(
@@ -163,9 +174,12 @@ async def create_video_job(
         audio=audio,
         priority_mode=priority_mode,
         allow_degraded_config=allow_degraded_config,
+        allow_paid_fallback=allow_paid_fallback,
     )
     try:
         selection: ResolvedSelection = select_best_model(catalog, request)
+    except NoFreeVideoModelError:
+        raise
     except NoCompatibleModelError as exc:
         raise ValidationError(str(exc)) from exc
 
@@ -179,6 +193,15 @@ async def create_video_job(
         )
         cost_estimate = estimate_cost(primary_row, cost_request)
     await _enforce_daily_cost_limit(db, owner_user_id, settings, additional_cost=cost_estimate or 0.0)
+
+    is_free_route = bool(primary_row is not None and primary_row.is_free)
+    # Only "paid fallback used" when FREE_FIRST was requested AND paid
+    # permission was explicitly granted AND the selection actually ended up
+    # non-free -- distinct from a QUALITY/BALANCED/etc. job, which is also
+    # "not free" but never went through the free-first-then-paid path.
+    paid_fallback_used = bool(
+        priority_mode == VideoPriorityMode.FREE_FIRST and allow_paid_fallback and not is_free_route
+    )
 
     job = VideoJob(
         owner_user_id=owner_user_id,
@@ -197,6 +220,8 @@ async def create_video_job(
         selected_model_id=selection.primary_model_id,
         status=AIVideoJobStatus.QUEUED,
         cost_estimate=cost_estimate,
+        is_free_route=is_free_route,
+        paid_fallback_used=paid_fallback_used,
         resolution=selection.validated_params.get("resolution"),
         aspect_ratio=selection.validated_params.get("aspect_ratio"),
         duration_seconds=selection.validated_params.get("duration"),

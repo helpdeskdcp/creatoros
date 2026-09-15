@@ -3,7 +3,7 @@ import os
 import uuid
 
 from fastapi import APIRouter, Depends
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +25,7 @@ from app.modules.video_generation.schemas import (
 )
 from app.video.catalog import get_capabilities_summary, get_health_summary, list_active_models
 from app.video.models import VideoModelCatalogEntry
+from app.video.router import NoFreeVideoModelError
 
 router = APIRouter()
 
@@ -59,19 +60,34 @@ async def create_video_job(
     """Selects the best available model + full fallback chain via
     VideoModelRouter and enqueues the first submission attempt. Returns
     immediately (202) -- generation itself happens asynchronously; poll
-    GET /video-jobs/{id} for status."""
-    job = await service.create_video_job(
-        db, user.id,
-        generation_type=payload.generation_type,
-        prompt=payload.prompt,
-        priority_mode=payload.priority_mode,
-        duration=payload.duration,
-        resolution=payload.resolution,
-        aspect_ratio=payload.aspect_ratio,
-        audio=payload.audio,
-        input_references=payload.input_image_urls,
-        allow_degraded_config=payload.allow_degraded_config,
-    )
+    GET /video-jobs/{id} for status.
+
+    FREE_FIRST hard billing guard: if no genuinely free video-generation
+    model can satisfy this request and the caller did not set
+    allow_paid_fallback=true, NO VideoJob row is created and this returns
+    the structured {"status": "NO_FREE_VIDEO_MODEL", "requires_credits":
+    true, "paid_fallback_used": false} contract instead -- never a silent
+    substitution of a paid model. See app.video.router.NoFreeVideoModelError."""
+    try:
+        job = await service.create_video_job(
+            db, user.id,
+            generation_type=payload.generation_type,
+            prompt=payload.prompt,
+            priority_mode=payload.priority_mode,
+            duration=payload.duration,
+            resolution=payload.resolution,
+            aspect_ratio=payload.aspect_ratio,
+            audio=payload.audio,
+            input_references=payload.input_image_urls,
+            allow_degraded_config=payload.allow_degraded_config,
+            allow_paid_fallback=payload.allow_paid_fallback,
+        )
+    except NoFreeVideoModelError:
+        return JSONResponse(
+            status_code=200,
+            content={"status": "NO_FREE_VIDEO_MODEL", "requires_credits": True, "paid_fallback_used": False},
+        )
+
     from app.jobs.tasks import submit_video_job_task
 
     submit_video_job_task.delay(str(job.id))

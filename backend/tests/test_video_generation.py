@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.ai.providers.base import (
     AIGenerationTimeoutError,
@@ -35,6 +35,7 @@ from app.modules.video_generation.models import (
     AIVideoJobStatus,
     VideoGenerationAttempt,
     VideoGenerationType,
+    VideoJob,
     VideoPriorityMode,
 )
 from app.video import catalog as catalog_module
@@ -43,6 +44,7 @@ from app.video.providers.openrouter_video import OpenRouterVideoProvider, VideoG
 from app.video.qc import run_qc
 from app.video.router import (
     NoCompatibleModelError,
+    NoFreeVideoModelError,
     VideoRequest,
     passes_hard_gate,
     select_best_model,
@@ -323,11 +325,60 @@ def test_free_first_mode_prefers_free_models_when_capable():
     assert selection.primary_model_id == "acme/free"
 
 
-def test_free_first_mode_falls_back_to_paid_when_no_free_model_capable():
+def test_free_first_mode_blocks_instead_of_silently_using_paid_model():
+    # The hard billing guard (never silently fall back from free to paid):
+    # a paid-only catalog under FREE_FIRST, with no explicit permission,
+    # must raise -- never quietly return the paid model as if it were fine.
     paid_only = _model("acme/paid", is_free=False, frame_images=["first_frame"])
     req = VideoRequest(generation_type=VideoGenerationType.FIRST_FRAME, priority_mode=VideoPriorityMode.FREE_FIRST)
+    with pytest.raises(NoFreeVideoModelError):
+        select_best_model([paid_only], req)
+
+
+def test_free_first_mode_uses_paid_model_when_fallback_explicitly_allowed():
+    paid_only = _model("acme/paid", is_free=False, frame_images=["first_frame"])
+    req = VideoRequest(
+        generation_type=VideoGenerationType.FIRST_FRAME,
+        priority_mode=VideoPriorityMode.FREE_FIRST,
+        allow_paid_fallback=True,
+    )
     selection = select_best_model([paid_only], req)
     assert selection.primary_model_id == "acme/paid"
+
+
+def test_free_first_mode_blocks_when_no_free_model_exists_at_all():
+    paid_only = _model("acme/paid", is_free=False)
+    req = VideoRequest(generation_type=VideoGenerationType.TEXT_TO_VIDEO, priority_mode=VideoPriorityMode.FREE_FIRST)
+    with pytest.raises(NoFreeVideoModelError):
+        select_best_model([paid_only], req)
+
+
+def test_free_first_mode_widens_to_paid_pool_when_free_models_lack_capability_and_fallback_allowed():
+    # A free model exists but can't satisfy THIS request's capability; a
+    # paid model can. allow_paid_fallback=True must widen the search
+    # rather than treating "some free model exists" as good enough.
+    free_wrong_capability = _model("acme/free", is_free=True, frame_images=None)
+    paid_capable = _model("acme/paid", is_free=False, frame_images=["first_frame"])
+    req = VideoRequest(
+        generation_type=VideoGenerationType.FIRST_FRAME,
+        priority_mode=VideoPriorityMode.FREE_FIRST,
+        allow_degraded_config=False,
+        allow_paid_fallback=True,
+    )
+    selection = select_best_model([free_wrong_capability, paid_capable], req)
+    assert selection.primary_model_id == "acme/paid"
+
+
+def test_free_first_mode_blocks_when_free_model_lacks_capability_and_no_fallback_allowed():
+    free_wrong_capability = _model("acme/free", is_free=True, frame_images=None)
+    paid_capable = _model("acme/paid", is_free=False, frame_images=["first_frame"])
+    req = VideoRequest(
+        generation_type=VideoGenerationType.FIRST_FRAME,
+        priority_mode=VideoPriorityMode.FREE_FIRST,
+        allow_degraded_config=False,
+    )
+    with pytest.raises(NoFreeVideoModelError):
+        select_best_model([free_wrong_capability, paid_capable], req)
 
 
 def test_no_compatible_model_raises_when_catalog_empty():
@@ -507,6 +558,21 @@ async def test_submit_job_model_not_found_raises_typed_error(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_submit_job_insufficient_credits_raises_typed_error(monkeypatch):
+    # Real, live-observed failure mode on a zero-balance OpenRouter
+    # account: HTTP 402. Must surface as a distinct, actionable error --
+    # never confused with ModelNotAvailableError/RateLimitedError, since
+    # the fix (add credits) is completely different from either.
+    monkeypatch.setattr(
+        "app.video.providers.openrouter_video.httpx.AsyncClient",
+        lambda **kw: _FakeVideoAsyncClient(_FakeResponse(402, text="insufficient credits")),
+    )
+    provider = OpenRouterVideoProvider(_settings_with_key())
+    with pytest.raises(AIProviderError, match="Insufficient OpenRouter credits"):
+        await provider.submit_job({"model": "alibaba/wan-3.0-prime"})
+
+
+@pytest.mark.asyncio
 async def test_missing_api_key_never_makes_a_request(monkeypatch):
     called = {"value": False}
 
@@ -652,6 +718,51 @@ async def test_create_video_job_raises_validation_error_when_impossible(db_sessi
         await vg_service.create_video_job(
             db_session, user.id, generation_type=VideoGenerationType.TEXT_TO_VIDEO, prompt="x",
         )
+
+
+@pytest.mark.asyncio
+async def test_create_video_job_blocks_free_first_paid_only_catalog_without_permission(db_session):
+    # Requirement: never spend credits without explicit paid-video
+    # permission, and never create a job row for the blocked case.
+    user = await _make_user(db_session, "video-free-blocked@example.com")
+    await _seed_catalog(db_session, _model("acme/paid", is_free=False))
+
+    with pytest.raises(NoFreeVideoModelError):
+        await vg_service.create_video_job(
+            db_session, user.id, generation_type=VideoGenerationType.TEXT_TO_VIDEO,
+            prompt="a cat", priority_mode=VideoPriorityMode.FREE_FIRST,
+        )
+
+    count = await db_session.scalar(select(func.count()).select_from(VideoJob).where(VideoJob.owner_user_id == user.id))
+    assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_create_video_job_uses_paid_model_with_explicit_permission_and_records_it(db_session):
+    user = await _make_user(db_session, "video-free-explicit-paid@example.com")
+    await _seed_catalog(db_session, _model("acme/paid", is_free=False))
+
+    job = await vg_service.create_video_job(
+        db_session, user.id, generation_type=VideoGenerationType.TEXT_TO_VIDEO,
+        prompt="a cat", priority_mode=VideoPriorityMode.FREE_FIRST, allow_paid_fallback=True,
+    )
+    assert job.primary_model_id == "acme/paid"
+    assert job.is_free_route is False
+    assert job.paid_fallback_used is True
+
+
+@pytest.mark.asyncio
+async def test_create_video_job_free_first_with_free_model_available_is_not_marked_paid_fallback(db_session):
+    user = await _make_user(db_session, "video-free-ok@example.com")
+    await _seed_catalog(db_session, _model("acme/free", is_free=True))
+
+    job = await vg_service.create_video_job(
+        db_session, user.id, generation_type=VideoGenerationType.TEXT_TO_VIDEO,
+        prompt="a cat", priority_mode=VideoPriorityMode.FREE_FIRST,
+    )
+    assert job.primary_model_id == "acme/free"
+    assert job.is_free_route is True
+    assert job.paid_fallback_used is False
 
 
 class _ScriptedVideoProvider:
