@@ -171,7 +171,20 @@ async def create_video_job(
     return the {"status": "NO_FREE_VIDEO_MODEL", ...} contract instead of
     a generic error envelope, and no VideoJob row is created for it (the
     hard billing guard blocks the request itself, before any job/attempt
-    exists)."""
+    exists).
+
+    KNOWN GAP (documented, not implemented): allow_paid_fallback is only
+    consulted HERE, at creation time, to decide the initial candidate
+    pool. It is never persisted on the VideoJob row. If every model in an
+    all-free fallback_chain later fails at RUNTIME (see
+    _advance_to_next_model_or_fail below), the job goes to FAILED rather
+    than re-checking allow_paid_fallback and dynamically extending into
+    the paid pool. Fixing this would need a new persisted column plus
+    runtime chain re-selection -- deliberately not built yet because it's
+    currently unreachable: zero free video models exist on OpenRouter as
+    of this writing, so no job's fallback_chain is ever all-free, and
+    this path can't be exercised against reality. Revisit if OpenRouter
+    ever lists a genuinely free video model."""
     settings = get_settings()
     if duration and duration > settings.video_max_duration_seconds:
         raise ValidationError(
@@ -367,6 +380,12 @@ async def submit_attempt(db: AsyncSession, job: VideoJob, settings: Settings | N
 async def _advance_to_next_model_or_fail(
     db: AsyncSession, job: VideoJob, *, error_code: str, error_message: str
 ) -> None:
+    # KNOWN GAP (see create_video_job's docstring): if `chain` was built
+    # entirely from free models (is_free_route=True) and every one of
+    # them fails here, this goes straight to FAILED -- it does not
+    # re-check whether paid fallback was permitted and extend into the
+    # paid pool. Deliberately left undone: unreachable today since no
+    # free video model exists on OpenRouter to ever populate such a chain.
     chain = json.loads(job.fallback_chain_json) if job.fallback_chain_json else []
     if not chain or job.attempt >= job.max_attempts:
         job.status = AIVideoJobStatus.FAILED
