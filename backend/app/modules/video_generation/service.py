@@ -37,6 +37,7 @@ from app.modules.video_generation.models import (
     VideoPriorityMode,
 )
 from app.video import catalog as catalog_module
+from app.video.providers.magic_hour_video import MagicHourVideoProvider
 from app.video.providers.nvidia_video import NVIDIAVideoProvider
 from app.video.providers.openrouter_video import OpenRouterVideoProvider
 from app.video.qc import run_qc
@@ -347,21 +348,54 @@ def _build_nvidia_payload(job: VideoJob) -> dict:
     return payload
 
 
+def _build_magic_hour_payload(job: VideoJob) -> dict:
+    """Magic Hour's real request schema (assets.image_file_path,
+    style.prompt, end_seconds) -- see
+    app.video.providers.magic_hour_video's module docstring. Kept separate
+    from _build_payload's OpenRouter-specific field names, same reasoning
+    as _build_nvidia_payload."""
+    assert job.validated_params_json is not None, "job must have a resolved validated_params_json before submission"
+    params = json.loads(job.validated_params_json)
+    payload: dict = {}
+    if job.prompt:
+        payload["prompt"] = job.prompt
+    if params.get("resolution"):
+        payload["resolution"] = params["resolution"]
+    if params.get("aspect_ratio"):
+        payload["aspect_ratio"] = params["aspect_ratio"]
+    if params.get("duration"):
+        payload["duration"] = params["duration"]
+    if params.get("audio"):
+        payload["audio"] = True
+    if job.input_references_json:
+        refs = json.loads(job.input_references_json)
+        if refs:
+            payload["image"] = refs[0]
+    return payload
+
+
 def _build_payload_for_model(model_id: str, job: VideoJob) -> dict:
-    if model_id.split("/", 1)[0] == "nvidia":
+    provider_name = model_id.split("/", 1)[0] if "/" in model_id else ""
+    if provider_name == "nvidia":
         return _build_nvidia_payload(job)
+    if provider_name == "magichour":
+        return _build_magic_hour_payload(job)
     return _build_payload(model_id, job)
 
 
 def _provider_for_model_id(model_id: str, settings: Settings):
     """Provider dispatch, keyed off the model_id namespace convention
     already used throughout the catalog (e.g. "google/veo-3.1",
-    "nvidia/<model>") -- see app.video.catalog.normalize_model /
-    refresh_nvidia_catalog. Every model not explicitly namespaced "nvidia/"
-    is routed to OpenRouter, unchanged from before this dispatcher existed."""
+    "nvidia/<model>", "magichour/<model>") -- see
+    app.video.catalog.normalize_model / refresh_nvidia_catalog /
+    refresh_magic_hour_catalog. Every model not explicitly namespaced
+    "nvidia/" or "magichour/" is routed to OpenRouter, unchanged from
+    before this dispatcher existed."""
     provider_name = model_id.split("/", 1)[0] if "/" in model_id else ""
     if provider_name == "nvidia":
         return NVIDIAVideoProvider(settings)
+    if provider_name == "magichour":
+        return MagicHourVideoProvider(settings)
     return OpenRouterVideoProvider(settings)
 
 

@@ -140,6 +140,25 @@ class Settings(BaseSettings):
     # "FREE" or "PAID".
     nvidia_video_pricing_status: str = "UNKNOWN"  # "FREE" | "PAID" | "UNKNOWN"
 
+    # --- Magic Hour video generation (app/video/providers/magic_hour_video.py) ---
+    # A genuinely hosted, async REST API (POST .../text-to-video or
+    # .../image-to-video -> {id, credits_charged}; GET .../video-projects/
+    # {id} -> status/downloads) -- verified against docs.magichour.ai, not
+    # guessed. Unlike NVIDIA there's no self-hosting question here. But
+    # Magic Hour is a CREDIT-metered service: signup grants a finite free
+    # credit allotment, and every generation "charges credits" per its own
+    # docs -- the same rate-limited-trial pattern already established for
+    # NVIDIA's build.nvidia.com, not a genuinely free-forever endpoint.
+    magic_hour_api_key: str = ""
+    magic_hour_base_url: str = "https://api.magichour.ai/v1"
+    magic_hour_video_model: str = "default"
+    magic_hour_video_enabled: bool = False
+    # Same rule as nvidia_video_pricing_status: defaults to UNKNOWN, which
+    # blocks automatic submission regardless of priority/routing, until an
+    # operator who has checked their actual remaining credit balance and
+    # Magic Hour's current terms sets this explicitly.
+    magic_hour_video_pricing_status: str = "UNKNOWN"  # "FREE" | "PAID" | "UNKNOWN"
+
     # --- Billing ---
     billing_provider: str = "none"  # "none" (default -- CONFIGURATION_REQUIRED) or "stripe"
 
@@ -193,6 +212,10 @@ class Settings(BaseSettings):
     @property
     def nvidia_video_configured(self) -> bool:
         return bool(self.nvidia_video_enabled and self.nvidia_api_key and self.nvidia_video_model)
+
+    @property
+    def magic_hour_video_configured(self) -> bool:
+        return bool(self.magic_hour_video_enabled and self.magic_hour_api_key)
 
     @property
     def s3_configured(self) -> bool:

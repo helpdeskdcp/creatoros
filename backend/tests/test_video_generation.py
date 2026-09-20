@@ -42,6 +42,7 @@ from app.modules.video_generation.models import (
 )
 from app.video import catalog as catalog_module
 from app.video.models import CircuitState, VideoModelCatalogEntry
+from app.video.providers.magic_hour_video import MagicHourVideoProvider
 from app.video.providers.nvidia_video import NVIDIAVideoProvider
 from app.video.providers.openrouter_video import OpenRouterVideoProvider, VideoGenerationJobResult
 from app.video.qc import run_qc
@@ -937,6 +938,181 @@ async def test_refresh_nvidia_catalog_honors_operator_confirmed_pricing(db_sessi
     )
     assert row.pricing_status == "FREE"
     assert row.is_free is True
+
+
+# ---------------------------------------------------------------------------
+# Magic Hour video provider: genuinely async REST (POST .../text-to-video
+# or .../image-to-video -> {id, credits_charged}; GET .../video-projects/
+# {id} -> status/downloads)
+# ---------------------------------------------------------------------------
+
+def _settings_with_magic_hour():
+    settings = get_settings()
+    settings.magic_hour_api_key = FAKE_KEY
+    settings.magic_hour_video_enabled = True
+    return settings
+
+
+@pytest.mark.asyncio
+async def test_magic_hour_submit_text_to_video_posts_to_correct_endpoint(monkeypatch):
+    captured = {}
+
+    class _Client(_FakeVideoAsyncClient):
+        async def post(self, url, json=None, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            return _FakeResponse(200, {"id": "proj_abc", "credits_charged": 5})
+
+    monkeypatch.setattr("app.video.providers.magic_hour_video.httpx.AsyncClient", lambda **kw: _Client())
+    provider = MagicHourVideoProvider(_settings_with_magic_hour())
+    result = await provider.submit_job({"prompt": "a cat", "duration": 5})
+
+    assert captured["url"].endswith("/text-to-video")
+    assert captured["json"]["style"]["prompt"] == "a cat"
+    assert result.provider_job_id == "proj_abc"
+    assert result.status == "pending"
+    assert result.cost == 5
+
+
+@pytest.mark.asyncio
+async def test_magic_hour_submit_image_to_video_posts_to_correct_endpoint_with_image(monkeypatch):
+    captured = {}
+
+    class _Client(_FakeVideoAsyncClient):
+        async def post(self, url, json=None, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            return _FakeResponse(200, {"id": "proj_i2v", "credits_charged": 8})
+
+    monkeypatch.setattr("app.video.providers.magic_hour_video.httpx.AsyncClient", lambda **kw: _Client())
+    provider = MagicHourVideoProvider(_settings_with_magic_hour())
+    result = await provider.submit_job({"prompt": "animate this", "image": "https://example.com/x.jpg", "duration": 5})
+
+    assert captured["url"].endswith("/image-to-video")
+    assert captured["json"]["assets"]["image_file_path"] == "https://example.com/x.jpg"
+    assert result.provider_job_id == "proj_i2v"
+
+
+@pytest.mark.asyncio
+async def test_magic_hour_poll_job_maps_complete_status_and_download_url(monkeypatch):
+    monkeypatch.setattr(
+        "app.video.providers.magic_hour_video.httpx.AsyncClient",
+        lambda **kw: _FakeVideoAsyncClient(_FakeResponse(200, {
+            "status": "complete", "downloads": [{"url": "https://cdn.example.com/out.mp4"}], "credits_charged": 12,
+        })),
+    )
+    provider = MagicHourVideoProvider(_settings_with_magic_hour())
+    result = await provider.poll_job("proj_abc")
+    assert result.status == "completed"
+    assert result.unsigned_urls == ["https://cdn.example.com/out.mp4"]
+
+
+@pytest.mark.asyncio
+async def test_magic_hour_poll_job_maps_pending_and_rendering_statuses(monkeypatch):
+    for raw, expected in (("draft", "pending"), ("queued", "pending"), ("rendering", "in_progress")):
+        monkeypatch.setattr(
+            "app.video.providers.magic_hour_video.httpx.AsyncClient",
+            lambda raw=raw, **kw: _FakeVideoAsyncClient(_FakeResponse(200, {"status": raw})),
+        )
+        provider = MagicHourVideoProvider(_settings_with_magic_hour())
+        result = await provider.poll_job("proj_abc")
+        assert result.status == expected, f"raw={raw}"
+
+
+@pytest.mark.asyncio
+async def test_magic_hour_poll_job_surfaces_error_message_on_failure(monkeypatch):
+    monkeypatch.setattr(
+        "app.video.providers.magic_hour_video.httpx.AsyncClient",
+        lambda **kw: _FakeVideoAsyncClient(_FakeResponse(200, {
+            "status": "error", "error": {"message": "prompt violates content policy", "code": "content_policy"},
+        })),
+    )
+    provider = MagicHourVideoProvider(_settings_with_magic_hour())
+    result = await provider.poll_job("proj_abc")
+    assert result.status == "error"
+    assert result.error == "prompt violates content policy"
+
+
+@pytest.mark.asyncio
+async def test_magic_hour_insufficient_credits_raises_typed_error(monkeypatch):
+    monkeypatch.setattr(
+        "app.video.providers.magic_hour_video.httpx.AsyncClient",
+        lambda **kw: _FakeVideoAsyncClient(_FakeResponse(402, text="insufficient_credits")),
+    )
+    provider = MagicHourVideoProvider(_settings_with_magic_hour())
+    with pytest.raises(InsufficientCreditsError):
+        await provider.submit_job({"prompt": "x"})
+
+
+@pytest.mark.asyncio
+async def test_magic_hour_missing_key_never_makes_a_request(monkeypatch):
+    called = {"value": False}
+
+    def _fail(**kw):
+        called["value"] = True
+        return _FakeVideoAsyncClient()
+
+    monkeypatch.setattr("app.video.providers.magic_hour_video.httpx.AsyncClient", _fail)
+    settings = get_settings()
+    settings.magic_hour_api_key = ""
+    provider = MagicHourVideoProvider(settings)
+    with pytest.raises(AIProviderUnavailableError):
+        await provider.submit_job({"prompt": "x"})
+    assert called["value"] is False
+
+
+@pytest.mark.asyncio
+async def test_magic_hour_api_key_never_appears_in_error_messages(monkeypatch):
+    for status in (401, 403, 429, 500):
+        client = _FakeVideoAsyncClient(_FakeResponse(status, text=f"Bearer {FAKE_KEY} leaked in body"))
+        monkeypatch.setattr("app.video.providers.magic_hour_video.httpx.AsyncClient", lambda c=client, **kw: c)
+        provider = MagicHourVideoProvider(_settings_with_magic_hour())
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.submit_job({"prompt": "x"})
+        assert FAKE_KEY not in str(exc_info.value), f"leaked at status {status}"
+
+
+def test_provider_dispatch_routes_magic_hour_namespace_to_magic_hour_provider():
+    settings = get_settings()
+    assert isinstance(vg_service._provider_for_model_id("magichour/default", settings), MagicHourVideoProvider)
+
+
+@pytest.mark.asyncio
+async def test_refresh_magic_hour_catalog_seeds_row_as_unknown_pricing_by_default(db_session):
+    settings = get_settings()
+    settings.magic_hour_api_key = FAKE_KEY
+    settings.magic_hour_video_model = "default"
+    settings.magic_hour_video_enabled = True
+    settings.magic_hour_video_pricing_status = "UNKNOWN"
+
+    summary = await catalog_module.refresh_magic_hour_catalog(db_session, settings)
+    assert summary["added"] == 1
+
+    row = await db_session.scalar(
+        select(VideoModelCatalogEntry).where(VideoModelCatalogEntry.model_id == "magichour/default")
+    )
+    assert row.pricing_status == "UNKNOWN"
+    assert row.is_free is False
+    assert row.is_active is True
+    assert row.fallback_priority == 0  # default/first-tried video provider (2026-09-20 operator instruction)
+
+
+@pytest.mark.asyncio
+async def test_refresh_magic_hour_catalog_deactivates_row_when_disabled(db_session):
+    settings = get_settings()
+    settings.magic_hour_api_key = FAKE_KEY
+    settings.magic_hour_video_model = "default"
+    settings.magic_hour_video_enabled = True
+    await catalog_module.refresh_magic_hour_catalog(db_session, settings)
+
+    settings.magic_hour_video_enabled = False
+    summary = await catalog_module.refresh_magic_hour_catalog(db_session, settings)
+    assert summary["deactivated"] == 1
+
+    row = await db_session.scalar(
+        select(VideoModelCatalogEntry).where(VideoModelCatalogEntry.model_id == "magichour/default")
+    )
+    assert row.is_active is False
 
 
 # ---------------------------------------------------------------------------
