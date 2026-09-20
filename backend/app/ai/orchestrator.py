@@ -319,6 +319,9 @@ def build_orchestrator(settings: Settings | None = None) -> AIOrchestrator:
         ),
     }
 
-    primary = providers.get(settings.ai_primary_provider, providers["ollama"])
+    # Default to the hosted OpenAI-compatible provider, not local Ollama --
+    # Ollama is no longer running on this host, so silently falling back to
+    # it on a misconfigured/empty AI_PRIMARY_PROVIDER would fail every call.
+    primary = providers.get(settings.ai_primary_provider, providers["openai"])
     fallback = providers.get(settings.ai_fallback_provider) if settings.ai_fallback_provider else None
     return AIOrchestrator(primary=primary, fallback=fallback, providers=providers)
