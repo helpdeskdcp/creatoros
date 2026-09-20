@@ -277,10 +277,12 @@ async def refresh_magic_hour_catalog(db: AsyncSession, settings: Settings | None
     """Same config-driven seed/deactivate pattern as refresh_nvidia_catalog
     -- Magic Hour's real API (docs.magichour.ai) has no "list models with
     capabilities/pricing" discovery endpoint either. One row per
-    MAGIC_HOUR_VIDEO_MODEL. No fallback_priority override (unlike NVIDIA,
-    no explicit "try this first" instruction was given for Magic Hour) --
-    it ranks purely by score_model among peers once/if its pricing_status
-    is ever confirmed non-UNKNOWN."""
+    MAGIC_HOUR_VIDEO_MODEL. fallback_priority=0 makes it the default/
+    first-tried video provider whenever it's active and cost-verified
+    (operator instruction, 2026-09-20) -- same explicit-tier mechanism
+    already used for NVIDIA, so this never silently outranks a model
+    a future NVIDIA/other provider is *also* pinned to priority 0 for;
+    ties within a tier still fall back to score_model."""
     settings = settings or get_settings()
     model_id = f"magichour/{settings.magic_hour_video_model}" if settings.magic_hour_video_model else None
     now = datetime.now(UTC)
@@ -316,6 +318,7 @@ async def refresh_magic_hour_catalog(db: AsyncSession, settings: Settings | None
             is_free=is_free,
             pricing_status=settings.magic_hour_video_pricing_status,
             quality_tier_score=_DEFAULT_QUALITY_SCORE,
+            fallback_priority=0,
             is_active=True,
             last_checked_at=now,
         )
@@ -324,6 +327,7 @@ async def refresh_magic_hour_catalog(db: AsyncSession, settings: Settings | None
     else:
         row.is_free = is_free
         row.pricing_status = settings.magic_hour_video_pricing_status
+        row.fallback_priority = 0
         row.is_active = True
         row.last_checked_at = now
         updated = 1

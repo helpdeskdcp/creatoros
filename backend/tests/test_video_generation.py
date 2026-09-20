@@ -1094,6 +1094,7 @@ async def test_refresh_magic_hour_catalog_seeds_row_as_unknown_pricing_by_defaul
     assert row.pricing_status == "UNKNOWN"
     assert row.is_free is False
     assert row.is_active is True
+    assert row.fallback_priority == 0  # default/first-tried video provider (2026-09-20 operator instruction)
 
 
 @pytest.mark.asyncio
