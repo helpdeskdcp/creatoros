@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.cache import cached_generate
 from app.ai.orchestrator import AIOrchestrator
 from app.ai.router import AIMode
+from app.core.crud import get_owned_or_404
 from app.modules.thumbnails.models import ThumbnailBrief
 from app.modules.thumbnails.schemas import _GeneratedThumbnailBrief
 
@@ -66,3 +67,19 @@ async def list_briefs(db: AsyncSession, owner_user_id: uuid.UUID) -> list[Thumbn
         .order_by(ThumbnailBrief.created_at.desc())
     )
     return list(result)
+
+
+async def attach_image(
+    db: AsyncSession, owner_user_id: uuid.UUID, brief_id: uuid.UUID, image_url: str, image_provider: str
+) -> ThumbnailBrief:
+    """Records a chosen source image (e.g. a Pexels search result) against
+    an existing brief -- ownership-checked like every other brief access.
+    Never downloads/re-stores the file: image_path holds a direct URL,
+    same treatment as image-to-video's source-image field, since nothing
+    downstream yet reads this as a local path."""
+    brief = await get_owned_or_404(db, ThumbnailBrief, brief_id, owner_user_id)
+    brief.image_path = image_url
+    brief.image_provider = image_provider
+    await db.commit()
+    await db.refresh(brief)
+    return brief
