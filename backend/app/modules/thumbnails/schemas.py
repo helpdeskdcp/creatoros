@@ -10,6 +10,16 @@ class GenerateThumbnailBriefRequest(BaseModel):
     brand_notes: str | None = None
 
 
+class AttachThumbnailImageRequest(BaseModel):
+    # A direct, permanent image URL (e.g. a Pexels photo's download_url) --
+    # not re-downloaded/stored as a separate MediaAsset, same treatment as
+    # image-to-video's source-image URLs, since nothing downstream
+    # currently consumes image_path as a local file path (see
+    # ThumbnailBrief's docstring: "the resulting asset URL/path").
+    image_url: str
+    image_provider: str = "pexels"
+
+
 class ThumbnailBriefOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -23,6 +33,8 @@ class ThumbnailBriefOut(BaseModel):
     curiosity_notes: str | None
     brand_consistency_notes: str | None
     prompt: str | None
+    image_path: str | None
+    image_provider: str | None
     version: int
 
 
