@@ -273,6 +273,73 @@ async def refresh_nvidia_catalog(db: AsyncSession, settings: Settings | None = N
     return summary
 
 
+async def refresh_magic_hour_catalog(db: AsyncSession, settings: Settings | None = None) -> dict:
+    """Same config-driven seed/deactivate pattern as refresh_nvidia_catalog
+    -- Magic Hour's real API (docs.magichour.ai) has no "list models with
+    capabilities/pricing" discovery endpoint either. One row per
+    MAGIC_HOUR_VIDEO_MODEL. No fallback_priority override (unlike NVIDIA,
+    no explicit "try this first" instruction was given for Magic Hour) --
+    it ranks purely by score_model among peers once/if its pricing_status
+    is ever confirmed non-UNKNOWN."""
+    settings = settings or get_settings()
+    model_id = f"magichour/{settings.magic_hour_video_model}" if settings.magic_hour_video_model else None
+    now = datetime.now(UTC)
+
+    existing_rows = list(
+        (
+            await db.scalars(select(VideoModelCatalogEntry).where(VideoModelCatalogEntry.provider == "magichour"))
+        ).all()
+    )
+
+    if not settings.magic_hour_video_configured or model_id is None:
+        deactivated = 0
+        for existing_row in existing_rows:
+            if existing_row.is_active:
+                existing_row.is_active = False
+                deactivated += 1
+        if deactivated:
+            await db.commit()
+        return {"added": 0, "updated": 0, "deactivated": deactivated, "total_active": 0}
+
+    is_free = settings.magic_hour_video_pricing_status == "FREE"
+    row: VideoModelCatalogEntry | None = next((r for r in existing_rows if r.model_id == model_id), None)
+    added, updated = 0, 0
+    if row is None:
+        row = VideoModelCatalogEntry(
+            model_id=model_id,
+            name=settings.magic_hour_video_model,
+            provider="magichour",
+            description="Magic Hour-hosted video generation model, configured via MAGIC_HOUR_VIDEO_MODEL.",
+            supports_audio=True,
+            supports_image_reference=True,
+            supports_text_to_video=True,
+            is_free=is_free,
+            pricing_status=settings.magic_hour_video_pricing_status,
+            quality_tier_score=_DEFAULT_QUALITY_SCORE,
+            is_active=True,
+            last_checked_at=now,
+        )
+        db.add(row)
+        added = 1
+    else:
+        row.is_free = is_free
+        row.pricing_status = settings.magic_hour_video_pricing_status
+        row.is_active = True
+        row.last_checked_at = now
+        updated = 1
+
+    deactivated = 0
+    for other in existing_rows:
+        if other.model_id != model_id and other.is_active:
+            other.is_active = False
+            deactivated += 1
+
+    await db.commit()
+    summary = {"added": added, "updated": updated, "deactivated": deactivated, "total_active": 1}
+    logger.info("magic_hour_video_catalog_refreshed", **summary)
+    return summary
+
+
 async def list_active_models(db: AsyncSession) -> list[VideoModelCatalogEntry]:
     models = list(
         (

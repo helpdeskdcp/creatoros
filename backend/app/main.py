@@ -55,7 +55,7 @@ def create_app() -> FastAPI:
         # OpenRouter at startup just means an empty/stale catalog until
         # the next successful refresh (beat, or the next restart).
         from app.db.session import AsyncSessionLocal
-        from app.video.catalog import refresh_catalog, refresh_nvidia_catalog
+        from app.video.catalog import refresh_catalog, refresh_magic_hour_catalog, refresh_nvidia_catalog
 
         try:
             async with AsyncSessionLocal() as db:
@@ -67,6 +67,11 @@ def create_app() -> FastAPI:
                 await refresh_nvidia_catalog(db, settings)
         except Exception as exc:  # noqa: BLE001 -- startup must never crash on this
             logger.warning("nvidia_video_catalog_startup_refresh_failed", error=str(exc))
+        try:
+            async with AsyncSessionLocal() as db:
+                await refresh_magic_hour_catalog(db, settings)
+        except Exception as exc:  # noqa: BLE001 -- startup must never crash on this
+            logger.warning("magic_hour_video_catalog_startup_refresh_failed", error=str(exc))
 
     return app
 
