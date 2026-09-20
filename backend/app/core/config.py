@@ -159,6 +159,15 @@ class Settings(BaseSettings):
     # Magic Hour's current terms sets this explicitly.
     magic_hour_video_pricing_status: str = "UNKNOWN"  # "FREE" | "PAID" | "UNKNOWN"
 
+    # --- Pexels stock photo/video search (app/modules/media/pexels.py) ---
+    # Genuinely free (unlike NVIDIA/Magic Hour): Pexels' own API terms grant
+    # free access with generous rate limits for approved use, no per-call
+    # credit metering -- verified live (25,000 req/month limit returned by
+    # the API itself). Used for: (1) sourcing a free image to drive
+    # image-to-video generation, (2) importing stock video clips as B-roll
+    # media assets, (3) importing stock photos as thumbnail source images.
+    pexels_api_key: str = ""
+
     # --- Billing ---
     billing_provider: str = "none"  # "none" (default -- CONFIGURATION_REQUIRED) or "stripe"
 
@@ -216,6 +225,10 @@ class Settings(BaseSettings):
     @property
     def magic_hour_video_configured(self) -> bool:
         return bool(self.magic_hour_video_enabled and self.magic_hour_api_key)
+
+    @property
+    def pexels_configured(self) -> bool:
+        return bool(self.pexels_api_key)
 
     @property
     def s3_configured(self) -> bool:

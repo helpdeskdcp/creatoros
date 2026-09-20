@@ -130,3 +130,37 @@ def local_path_for(asset: MediaAsset) -> str | None:
 
     backend = LocalStorageBackend(settings.storage_local_path)
     return backend.resolve_local_path(asset.storage_key)
+
+
+_PEXELS_EXT_BY_PURPOSE: dict[MediaPurpose, tuple[str, str]] = {
+    MediaPurpose.VIDEO: (".mp4", "video/mp4"),
+    MediaPurpose.THUMBNAIL: (".jpg", "image/jpeg"),
+}
+
+
+async def import_from_pexels(
+    db: AsyncSession, owner_user_id: uuid.UUID, purpose: MediaPurpose, download_url: str, *, filename_hint: str
+) -> MediaAsset:
+    """Downloads a Pexels-hosted photo/video's real bytes and stores it as
+    a normal MediaAsset -- from here on it's indistinguishable from a
+    directly-uploaded file (usable in publishing/shorts/thumbnails exactly
+    the same way). See app.modules.media.pexels for the actual HTTP call."""
+    from app.modules.media import pexels
+
+    ext, content_type = _PEXELS_EXT_BY_PURPOSE[purpose]
+    settings = get_settings()
+    tmp_dir = os.path.join(settings.storage_local_path, "_tmp_incoming")
+    os.makedirs(tmp_dir, exist_ok=True)
+    tmp_path = os.path.join(tmp_dir, f"{uuid.uuid4().hex}{ext}")
+
+    try:
+        written = await pexels.download_to_file(download_url, tmp_path)
+        if written == 0:
+            raise ValidationError("Pexels download returned an empty file")
+        return await save_local_file(
+            db, owner_user_id, purpose, tmp_path,
+            original_filename=f"{filename_hint}{ext}", content_type=content_type,
+        )
+    finally:
+        if os.path.isfile(tmp_path):
+            os.remove(tmp_path)  # no-op if save_local_file already moved it (local backend)
